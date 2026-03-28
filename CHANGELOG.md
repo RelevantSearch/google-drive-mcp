@@ -2,6 +2,8 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
 ## [2.0.0](https://github.com/piotr-agier/google-drive-mcp/compare/v1.7.6...v2.0.0) (2026-03-28)
 
 ### Breaking Changes
