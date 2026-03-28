@@ -70,6 +70,7 @@ describe('HTTP transport', () => {
   after(async () => {
     for (const [, session] of sessions) {
       await session.transport.close();
+      await session.server.close();
     }
     sessions.clear();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
