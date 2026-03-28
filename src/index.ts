@@ -574,9 +574,35 @@ interface HttpSession {
  * Create an Express app with MCP Streamable HTTP routes.
  * Shared by production (startHttpTransport) and tests.
  */
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
 function createHttpApp(host: string) {
   const app = createMcpExpressApp({ host });
   const sessions = new Map<string, HttpSession>();
+  const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function resetSessionTimer(sid: string) {
+    const existing = sessionTimers.get(sid);
+    if (existing) clearTimeout(existing);
+    sessionTimers.set(sid, setTimeout(async () => {
+      const session = sessions.get(sid);
+      if (session) {
+        log(`Session idle timeout: ${sid}`);
+        await session.transport.close();
+        await session.server.close();
+        sessions.delete(sid);
+      }
+      sessionTimers.delete(sid);
+    }, SESSION_IDLE_TIMEOUT_MS));
+  }
+
+  function clearSessionTimer(sid: string) {
+    const timer = sessionTimers.get(sid);
+    if (timer) {
+      clearTimeout(timer);
+      sessionTimers.delete(sid);
+    }
+  }
 
   app.post('/mcp', async (req, res) => {
     try {
@@ -585,6 +611,7 @@ function createHttpApp(host: string) {
       // If we have an existing session, delegate to it
       if (sessionId && sessions.has(sessionId)) {
         const session = sessions.get(sessionId)!;
+        resetSessionTimer(sessionId);
         await session.transport.handleRequest(req, res, req.body);
         return;
       }
@@ -611,6 +638,7 @@ function createHttpApp(host: string) {
       transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid) {
+          clearSessionTimer(sid);
           sessions.delete(sid);
           log(`Session closed: ${sid}`);
         }
@@ -621,6 +649,7 @@ function createHttpApp(host: string) {
       const sid = transport.sessionId;
       if (sid) {
         sessions.set(sid, { transport, server: sessionServer });
+        resetSessionTimer(sid);
         log(`New session created: ${sid}`);
       }
     } catch (error) {
@@ -647,6 +676,7 @@ function createHttpApp(host: string) {
         return;
       }
       const session = sessions.get(sessionId)!;
+      resetSessionTimer(sessionId);
       await session.transport.handleRequest(req, res);
     } catch (error) {
       log('Error handling GET /mcp', { error: (error as Error).message });
@@ -673,6 +703,7 @@ function createHttpApp(host: string) {
       }
       const session = sessions.get(sessionId)!;
       await session.transport.close();
+      await session.server.close();
       sessions.delete(sessionId);
       res.status(200).end();
     } catch (error) {
@@ -705,6 +736,7 @@ async function startHttpTransport(args: CliArgs): Promise<void> {
       log('Shutting down HTTP server...');
       for (const [sid, session] of sessions) {
         await session.transport.close();
+        await session.server.close();
         sessions.delete(sid);
       }
       httpServer.close();

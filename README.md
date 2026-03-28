@@ -373,7 +373,7 @@ CLI flags take priority over environment variables.
 
 The HTTP endpoint is `POST /mcp` for JSON-RPC requests, `GET /mcp` for SSE streaming, and `DELETE /mcp` to close a session. After the initial `initialize` request, all subsequent requests must include the `mcp-session-id` header returned in the initialize response.
 
-When binding to `127.0.0.1` (default), DNS rebinding protection is automatically enabled. For remote deployments (`0.0.0.0`), use service account or external token authentication and ensure the endpoint is behind a reverse proxy with TLS.
+When binding to `127.0.0.1` (default), DNS rebinding protection is automatically enabled. For remote deployments (`0.0.0.0`), use service account or external token authentication and ensure the endpoint is behind a reverse proxy with TLS. **Without authentication and TLS, anyone who can reach the port gets full access to the configured Google Drive account.**
 
 ### MCP client configuration (HTTP)
 
