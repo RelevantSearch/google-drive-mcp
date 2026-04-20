@@ -167,6 +167,20 @@ describe('Docs tools', () => {
       assert.ok(res.content[0].text.includes('inserted'));
     });
 
+    it('with tabId forwards tabId to Location', async () => {
+      const res = await callTool(ctx.client, 'insertText', { documentId: 'doc-1', text: 'hello', index: 1, tabId: 'tab-7' });
+      assert.equal(res.isError, false);
+      assert.ok(res.content[0].text.includes('tab-7'));
+
+      const calls = ctx.mocks.docs.tracker.getCalls('documents.batchUpdate');
+      const lastCall = calls[calls.length - 1];
+      const requests = lastCall?.args?.[0]?.requestBody?.requests;
+      assert.equal(requests?.length, 1);
+      assert.equal(requests[0].insertText.location.tabId, 'tab-7');
+      assert.equal(requests[0].insertText.location.index, 1);
+      assert.equal(requests[0].insertText.text, 'hello');
+    });
+
     it('validation error', async () => {
       const res = await callTool(ctx.client, 'insertText', {});
       assert.equal(res.isError, true);
@@ -179,6 +193,20 @@ describe('Docs tools', () => {
       const res = await callTool(ctx.client, 'deleteRange', { documentId: 'doc-1', startIndex: 1, endIndex: 5 });
       assert.equal(res.isError, false);
       assert.ok(res.content[0].text.includes('deleted'));
+    });
+
+    it('with tabId forwards tabId to Range', async () => {
+      const res = await callTool(ctx.client, 'deleteRange', { documentId: 'doc-1', startIndex: 1, endIndex: 5, tabId: 'tab-7' });
+      assert.equal(res.isError, false);
+      assert.ok(res.content[0].text.includes('tab-7'));
+
+      const calls = ctx.mocks.docs.tracker.getCalls('documents.batchUpdate');
+      const lastCall = calls[calls.length - 1];
+      const requests = lastCall?.args?.[0]?.requestBody?.requests;
+      assert.equal(requests?.length, 1);
+      assert.equal(requests[0].deleteContentRange.range.tabId, 'tab-7');
+      assert.equal(requests[0].deleteContentRange.range.startIndex, 1);
+      assert.equal(requests[0].deleteContentRange.range.endIndex, 5);
     });
 
     it('validation: endIndex must be > startIndex', async () => {
@@ -1193,6 +1221,17 @@ describe('Docs tools', () => {
     it('renameDocumentTab happy path', async () => {
       const res = await callTool(ctx.client, 'renameDocumentTab', { documentId: 'doc-1', tabId: 'tab-1', title: 'Renamed' });
       assert.equal(res.isError, false);
+
+      // tabId must live INSIDE tabProperties — Google rejects the payload if it's at the request root.
+      const calls = ctx.mocks.docs.tracker.getCalls('documents.batchUpdate');
+      const lastCall = calls[calls.length - 1];
+      const requests = lastCall?.args?.[0]?.requestBody?.requests;
+      assert.equal(requests?.length, 1);
+      const req = requests[0].updateDocumentTabProperties;
+      assert.equal(req.tabProperties.tabId, 'tab-1');
+      assert.equal(req.tabProperties.title, 'Renamed');
+      assert.equal(req.fields, 'title');
+      assert.equal(req.tabId, undefined, 'tabId must not be at the request root');
     });
 
     it('insertSmartChip happy path', async () => {
