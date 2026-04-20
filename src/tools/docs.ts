@@ -1843,7 +1843,7 @@ export async function handleTool(toolName: string, args: Record<string, unknown>
       });
 
       return {
-        content: [{ type: "text", text: `Successfully deleted content from index ${a.startIndex} to ${a.endIndex}` }],
+        content: [{ type: "text", text: `Successfully deleted content from index ${a.startIndex} to ${a.endIndex}${a.tabId ? ` in tab ${a.tabId}` : ''}` }],
         isError: false
       };
     }
