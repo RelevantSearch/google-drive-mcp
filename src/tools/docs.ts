@@ -711,7 +711,8 @@ const CreateGoogleDocSchema = z.object({
 
 const UpdateGoogleDocSchema = z.object({
   documentId: z.string().min(1, "Document ID is required"),
-  content: z.string()
+  content: z.string(),
+  tabId: z.string().optional()
 });
 
 const GetGoogleDocContentSchema = z.object({
@@ -942,12 +943,13 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "updateGoogleDoc",
-    description: "Update an existing Google Doc",
+    description: "Update an existing Google Doc (replaces all content). For multi-tab docs, specify tabId to replace a single tab's content atomically; leaves other tabs untouched.",
     inputSchema: {
       type: "object",
       properties: {
         documentId: { type: "string", description: "Doc ID" },
-        content: { type: "string", description: "New content" }
+        content: { type: "string", description: "New content" },
+        tabId: { type: "string", description: "Optional. Tab ID to replace (from listDocumentTabs). If set, delete+insert run in a single atomic batchUpdate scoped to that tab." }
       },
       required: ["documentId", "content"]
     }
@@ -1455,6 +1457,50 @@ export async function handleTool(toolName: string, args: Record<string, unknown>
       const a = validation.data;
 
       const docs = ctx.google.docs({ version: 'v1', auth: ctx.authClient });
+
+      if (a.tabId) {
+        // Tab-scoped path: single atomic batchUpdate so a failed insert can't leave the tab wiped.
+        const document = await docs.documents.get({ documentId: a.documentId, includeTabsContent: true });
+        const tabs = (document.data as any).tabs as any[] | undefined;
+        const tab = tabs ? findTabById(tabs, a.tabId) : null;
+        if (!tab) {
+          return errorResponse(`Tab with ID "${a.tabId}" not found. Use listDocumentTabs to see available tabs.`);
+        }
+
+        const bodyContent = tab.documentTab?.body?.content;
+        const lastEndIndex = bodyContent?.[bodyContent.length - 1]?.endIndex ?? 1;
+        const deleteEndIndex = Math.max(1, lastEndIndex - 1);
+
+        const requests: any[] = [];
+        if (deleteEndIndex > 1) {
+          requests.push({
+            deleteContentRange: {
+              range: { startIndex: 1, endIndex: deleteEndIndex, tabId: a.tabId }
+            }
+          });
+        }
+        requests.push({
+          insertText: { location: { index: 1, tabId: a.tabId }, text: a.content }
+        });
+        requests.push({
+          updateParagraphStyle: {
+            range: { startIndex: 1, endIndex: a.content.length + 1, tabId: a.tabId },
+            paragraphStyle: { namedStyleType: 'NORMAL_TEXT' },
+            fields: 'namedStyleType'
+          }
+        });
+
+        await docs.documents.batchUpdate({
+          documentId: a.documentId,
+          requestBody: { requests }
+        });
+
+        return {
+          content: [{ type: "text", text: `Updated Google Doc: ${document.data.title} (tab: ${a.tabId})` }],
+          isError: false
+        };
+      }
+
       const document = await docs.documents.get({ documentId: a.documentId });
 
       // Delete all content
