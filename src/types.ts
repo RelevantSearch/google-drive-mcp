@@ -13,6 +13,12 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export interface ToolContextUser {
+  sub: string;
+  email: string;
+  scope: string;
+}
+
 export interface ToolContext {
   authClient: any;
   google: typeof GoogleApisType;
@@ -23,6 +29,8 @@ export interface ToolContext {
   resolveFolderId: (input: string | undefined) => Promise<string>;
   checkFileExists: (name: string, parentFolderId?: string) => Promise<string | null>;
   validateTextFileExtension: (name: string) => void;
+  /** Present when a bearer token was validated. Absent in stdio mode. */
+  user?: ToolContextUser;
 }
 
 export function errorResponse(message: string): ToolResult {
