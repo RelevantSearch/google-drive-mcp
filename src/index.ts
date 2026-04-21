@@ -578,7 +578,11 @@ function parseCliArgs(): CliArgs {
     process.exit(1);
   }
 
-  const resolvedPort = parseInt(httpPort || process.env.MCP_HTTP_PORT || '3100', 10);
+  // Cloud Run injects $PORT (default 8080) — honour it as the last fallback.
+  const resolvedPort = parseInt(
+    httpPort || process.env.MCP_HTTP_PORT || process.env.PORT || '3100',
+    10,
+  );
   if (isNaN(resolvedPort) || resolvedPort < 1 || resolvedPort > 65535) {
     console.error(`Invalid port: ${httpPort || process.env.MCP_HTTP_PORT}. Must be 1-65535.`);
     process.exit(1);
