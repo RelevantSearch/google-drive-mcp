@@ -2,10 +2,10 @@ name: CI and Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   PROJECT_ID: rs-workspace-integrations
@@ -35,7 +35,7 @@ jobs:
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
       COMMIT_SHA: ${{ github.sha }}
