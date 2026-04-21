@@ -18,6 +18,7 @@ import { randomUUID, randomBytes } from 'crypto';
 import { google } from "googleapis";
 import type { drive_v3, calendar_v3 } from "googleapis";
 import { authenticate, AuthServer, initializeOAuth2Client } from './auth.js';
+import { OAuth2Client } from 'google-auth-library';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -32,7 +33,6 @@ import { FirestoreStore } from './auth/firestore-store.js';
 import { GoogleOAuth } from './auth/google-oauth.js';
 import { McpJwt } from './auth/jwt.js';
 import { DriveOAuthProvider } from './auth/provider.js';
-import { getUserAccessToken } from './auth/user-token.js';
 
 import * as driveTools from './tools/drive.js';
 import * as docsTools from './tools/docs.js';
@@ -231,30 +231,60 @@ function buildToolContext(): ToolContext {
  * We resolve the Google access token via cache → Firestore → refresh, then build an
  * ephemeral auth client that `googleapis` can use for this request's lifetime.
  */
-function buildUserToolContext(authInfo: AuthInfo, deps: AuthDeps): ToolContext {
+async function buildUserToolContext(authInfo: AuthInfo, deps: AuthDeps): Promise<ToolContext> {
   const userId = (authInfo.extra?.userId as string) ?? authInfo.clientId;
   const email = (authInfo.extra?.email as string) ?? '';
 
-  const userAuthClient = {
-    getAccessToken: async () => {
-      const token = await getUserAccessToken(userId, deps.store, deps.googleOAuth);
-      return { token };
-    },
-  };
+  const tokens = await deps.store.getUserTokens(userId);
+  if (!tokens) {
+    throw new Error(`No Google tokens stored for user ${userId}`);
+  }
+
+  // googleapis calls `.request()`, `.getAccessToken()`, and consumes credential
+  // events on the auth client — only a real OAuth2Client satisfies that shape.
+  // It also handles access-token refresh transparently via the refresh_token.
+  const oauth2Client = new OAuth2Client(
+    process.env.GOOGLE_OAUTH_CLIENT_ID,
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+  );
+  oauth2Client.setCredentials({
+    access_token: tokens.google_access_token,
+    refresh_token: tokens.google_refresh_token,
+    expiry_date: tokens.google_token_expires_at * 1000,
+  });
+
+  // Persist access tokens that OAuth2Client auto-refreshes so the next request
+  // doesn't reload a stale access_token from Firestore.
+  oauth2Client.on('tokens', (newTokens) => {
+    if (!newTokens.access_token) return;
+    const expirySec = newTokens.expiry_date
+      ? Math.floor(newTokens.expiry_date / 1000)
+      : Math.floor(Date.now() / 1000) + 3600;
+    deps.store
+      .saveUserTokens({
+        user_id: userId,
+        email,
+        google_access_token: newTokens.access_token,
+        google_refresh_token: newTokens.refresh_token ?? tokens.google_refresh_token,
+        google_token_expires_at: expirySec,
+        updated_at: new Date(),
+      })
+      .catch((err) => log('Failed to persist refreshed Google token', { err: String(err) }));
+  });
 
   let drive: drive_v3.Drive | null = null;
   let calendar: calendar_v3.Calendar | null = null;
   const lazyDrive = () => {
-    if (!drive) drive = google.drive({ version: 'v3', auth: userAuthClient as any });
+    if (!drive) drive = google.drive({ version: 'v3', auth: oauth2Client });
     return drive;
   };
 
   return {
-    authClient: userAuthClient,
+    authClient: oauth2Client,
     google,
     getDrive: lazyDrive,
     getCalendar: () => {
-      if (!calendar) calendar = google.calendar({ version: 'v3', auth: userAuthClient as any });
+      if (!calendar) calendar = google.calendar({ version: 'v3', auth: oauth2Client });
       return calendar;
     },
     log,
