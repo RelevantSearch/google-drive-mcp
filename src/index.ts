@@ -846,9 +846,14 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
 }
 
 /**
- * Build the OAuth auth dependencies from required env vars. Returns undefined
- * when any are missing so local HTTP runs (no Firestore, no Google OAuth) keep
- * working — the resulting app runs with no bearer guard.
+ * Build the OAuth auth dependencies from required env vars.
+ *
+ * Returns undefined only when running locally in development: an explicit
+ * `ALLOW_UNAUTHENTICATED_HTTP=1` must be set, AND we must not appear to be
+ * running on Cloud Run (`K_SERVICE` unset) AND not in production
+ * (`NODE_ENV !== 'production'`). In every other case a missing env var is a
+ * configuration error and we throw — an unauthenticated public `/mcp`
+ * endpoint is never acceptable.
  */
 function buildAuthDepsFromEnv(): AuthDeps | undefined {
   const publicUrl = process.env.PUBLIC_URL;
@@ -857,7 +862,22 @@ function buildAuthDepsFromEnv(): AuthDeps | undefined {
   const googleClientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 
   if (!publicUrl || !signingKey || !googleClientId || !googleClientSecret) {
-    log('Auth env vars not set — running HTTP without OAuth guard');
+    const looksLikeProd =
+      process.env.NODE_ENV === 'production' ||
+      !!process.env.K_SERVICE ||
+      !!process.env.K_REVISION;
+    const explicitOptOut = process.env.ALLOW_UNAUTHENTICATED_HTTP === '1';
+
+    if (looksLikeProd || !explicitOptOut) {
+      throw new Error(
+        'Missing required auth env vars (PUBLIC_URL, MCP_SIGNING_KEY, ' +
+          'GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET). Refusing to ' +
+          'start HTTP transport without the OAuth guard. Set ' +
+          'ALLOW_UNAUTHENTICATED_HTTP=1 to bypass (local dev only).',
+      );
+    }
+
+    log('ALLOW_UNAUTHENTICATED_HTTP=1 — starting HTTP without OAuth guard (dev only)');
     return undefined;
   }
 
@@ -920,12 +940,36 @@ async function handleGoogleCallback(req: Request, res: Response, deps: AuthDeps)
     return;
   }
 
-  // Consume the pending record — one-shot use.
+  // Exchange the Google code for tokens BEFORE consuming the pending record,
+  // so a transient network/Google failure doesn't burn the user's state and
+  // force a full restart.
+  let tokens;
+  try {
+    tokens = await deps.googleOAuth.exchangeCode(code, pending.google_pkce_verifier);
+  } catch (err) {
+    log('Google token exchange failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(502).send('Failed to exchange Google authorization code');
+    return;
+  }
+
   await deps.store.deletePendingAuthorization(googleState);
 
-  const tokens = await deps.googleOAuth.exchangeCode(code, pending.google_pkce_verifier);
   if (!tokens.id_token) {
     res.status(400).send('Google did not return an id_token — cannot identify user');
+    return;
+  }
+  if (!tokens.refresh_token) {
+    // Google only returns a refresh token on the first consent OR when
+    // prompt=consent is used. Our authorizationUrl always sets both
+    // access_type=offline and prompt=consent so a missing refresh_token here
+    // means the user silently accepted an existing grant without
+    // re-consenting — we can't persist per-user access going forward.
+    res.status(400).send(
+      'Google did not return a refresh token. Revoke the existing grant at ' +
+        'myaccount.google.com/permissions and retry.',
+    );
     return;
   }
 
@@ -950,7 +994,7 @@ async function handleGoogleCallback(req: Request, res: Response, deps: AuthDeps)
   await deps.store.saveUserTokens({
     user_id: userId,
     google_access_token: tokens.access_token,
-    google_refresh_token: tokens.refresh_token ?? '',
+    google_refresh_token: tokens.refresh_token,
     google_token_expires_at: nowSec + tokens.expires_in,
     email,
     updated_at: new Date(),
@@ -963,7 +1007,7 @@ async function handleGoogleCallback(req: Request, res: Response, deps: AuthDeps)
     user_id: userId,
     email,
     google_access_token: tokens.access_token,
-    google_refresh_token: tokens.refresh_token ?? '',
+    google_refresh_token: tokens.refresh_token,
     google_token_expires_at: nowSec + tokens.expires_in,
     created_at: new Date(),
   });

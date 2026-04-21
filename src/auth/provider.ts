@@ -8,6 +8,13 @@ import { GoogleOAuth } from './google-oauth.js';
 import { McpJwt } from './jwt.js';
 import { createHash, randomBytes } from 'crypto';
 
+/**
+ * Authorization codes are short-lived by RFC 6749 §4.1.2 (recommended 10 min
+ * max). We enforce 60s to reduce the replay window if a code leaks between
+ * issuance and /token consumption.
+ */
+export const AUTH_CODE_MAX_AGE_MS = 60_000;
+
 export class DriveOAuthProvider implements OAuthServerProvider {
   // Must be a getter per SDK interface
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -93,6 +100,11 @@ export class DriveOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const record = await this.store.consumeAuthorizationCode(authorizationCode);
     if (!record) throw new Error('Invalid or expired authorization code');
+
+    const age = Date.now() - new Date(record.created_at).getTime();
+    if (age > AUTH_CODE_MAX_AGE_MS) {
+      throw new Error('Invalid or expired authorization code');
+    }
 
     const accessToken = await this.jwt.sign({
       sub: record.user_id,

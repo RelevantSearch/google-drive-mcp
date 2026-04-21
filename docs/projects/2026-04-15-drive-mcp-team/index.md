@@ -9,7 +9,7 @@ version: 1
 
 ## Summary
 
-Deploy a team-wide Google Drive MCP server on Cloud Run in `rs-workspace-integrations`, exposed to claude.ai as a custom connector. Uses per-user OAuth (each team member acts as themselves against Google Drive) with refresh tokens stored in Firestore, envelope-encrypted via Cloud KMS. Starts from a fork of `piotr-agier/google-drive-mcp` which already supports Streamable HTTP transport; layers on per-user OAuth, Firestore-backed token storage, and an internal-only Google OAuth consent screen.
+Deploy a team-wide Google Drive MCP server on Cloud Run in `rs-workspace-integrations`, exposed to claude.ai as a custom connector. Uses per-user OAuth (each team member acts as themselves against Google Drive) with refresh tokens stored in Firestore (CMEK-encrypted at rest) for v1. Starts from a fork of `piotr-agier/google-drive-mcp` which already supports Streamable HTTP transport; layers on per-user OAuth, Firestore-backed token storage, and an internal-only Google OAuth consent screen.
 
 Unlocks the `relevant-brand-guidelines` skill's `createDocFromHTML` path (uncommitted upstream change) so branded docs can be generated directly in users' Drives.
 

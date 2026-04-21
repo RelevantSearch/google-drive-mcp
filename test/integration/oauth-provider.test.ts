@@ -306,6 +306,27 @@ describe('DriveOAuthProvider', () => {
         },
       );
     });
+
+    it('rejects a code older than AUTH_CODE_MAX_AGE_MS', async () => {
+      asMock(store.consumeAuthorizationCode).mock.mockImplementation(async () => ({
+        claude_code_challenge: 'challenge',
+        user_id: 'user-123',
+        email: 'stefan@relevantsearch.com',
+        google_access_token: 'google-access',
+        google_refresh_token: 'google-refresh',
+        google_token_expires_at: Math.floor(Date.now() / 1000) + 3600,
+        // Issued more than 60s ago.
+        created_at: new Date(Date.now() - 61_000),
+      }));
+
+      await assert.rejects(
+        () => provider.exchangeAuthorizationCode(MOCK_CLIENT, 'stale-code'),
+        (err: Error) => {
+          assert.ok(err.message.includes('Invalid or expired authorization code'));
+          return true;
+        },
+      );
+    });
   });
 
   describe('exchangeRefreshToken', () => {
