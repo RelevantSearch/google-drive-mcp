@@ -2,6 +2,23 @@
 
 A Model Context Protocol (MCP) server that provides secure integration with Google Drive, Docs, Sheets, Slides, and Calendar. It allows Claude Desktop and other MCP clients to manage files in Google Drive and calendar events through a standardized interface.
 
+---
+
+## Relevant Search fork
+
+This is the Relevant Search fork of [`piotr-agier/google-drive-mcp`](https://github.com/piotr-agier/google-drive-mcp). The `feat/team-oauth` branch adds:
+
+- A tool `createDocFromHTML` that creates Google Docs from brand-compliant HTML
+- An MCP OAuth 2.1 authorization server (via `@modelcontextprotocol/sdk` v1.29+) that delegates user auth to Google, so each team member acts as themselves against Google Drive
+- Firestore-backed per-user token persistence
+- Deployment to Cloud Run at `drive-mcp.relevantsearch.com`
+
+Connect with claude.ai: see [`docs/team-connector-setup.md`](./docs/team-connector-setup.md).
+
+Design and execution plans live in [`docs/projects/2026-04-15-drive-mcp-team/`](./docs/projects/2026-04-15-drive-mcp-team/).
+
+---
+
 ## Features
 
 - **Multi-format Support**: Work with Google Docs, Sheets, Slides, Calendar, and regular files
