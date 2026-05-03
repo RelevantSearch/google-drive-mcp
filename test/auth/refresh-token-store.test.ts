@@ -146,4 +146,35 @@ describe('RefreshTokenStore', () => {
       assert.ok(record!.expires_at < Date.now());
     });
   });
+
+  describe('rotate', () => {
+    it('atomically marks old as rotated and writes new active doc with same chainId and expiresAt', async () => {
+      const issued = await store.issue({
+        userId: 'user-1',
+        email: 'a@relevantsearch.com',
+        scopes: ['drive'],
+      });
+      const oldDocId = createHash('sha256').update(issued.rawToken).digest('base64url');
+      const oldRecord = mocks.docs.get(`refresh_tokens/${oldDocId}`) as RefreshTokenRecord;
+
+      const rotated = await store.rotate(issued.rawToken);
+      assert.notEqual(rotated.rawToken, issued.rawToken);
+      assert.equal(rotated.chainId, issued.chainId);
+      assert.equal(rotated.expiresAt, issued.expiresAt);
+
+      const oldNow = mocks.docs.get(`refresh_tokens/${oldDocId}`) as RefreshTokenRecord;
+      assert.equal(oldNow.status, 'rotated');
+      assert.ok(oldNow.rotated_at instanceof Date);
+
+      const newDocId = createHash('sha256').update(rotated.rawToken).digest('base64url');
+      const newRecord = mocks.docs.get(`refresh_tokens/${newDocId}`) as RefreshTokenRecord;
+      assert.equal(newRecord.status, 'active');
+      assert.equal(newRecord.chain_id, oldRecord.chain_id);
+      assert.equal(newRecord.expires_at, oldRecord.expires_at);
+    });
+
+    it('throws when raw token is unknown', async () => {
+      await assert.rejects(() => store.rotate('unknown-token'), /not found/i);
+    });
+  });
 });

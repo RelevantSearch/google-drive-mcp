@@ -65,4 +65,46 @@ export class RefreshTokenStore {
     if (!snap.exists) return null;
     return snap.data() as RefreshTokenRecord;
   }
+
+  /**
+   * Atomically rotates the token: marks the existing doc as rotated and
+   * writes a new active doc with the same chain_id and expires_at.
+   * Throws if the rawToken does not resolve to an existing doc.
+   * Caller is responsible for status/expiry validation BEFORE calling rotate.
+   */
+  async rotate(rawToken: string): Promise<IssueResult> {
+    const oldHash = hashToken(rawToken);
+    const newRawToken = generateRawToken();
+    const newHash = hashToken(newRawToken);
+
+    return this.db.runTransaction(async (tx) => {
+      const oldRef = this.db.collection(COLLECTION).doc(oldHash);
+      const oldSnap = await tx.get(oldRef);
+      if (!oldSnap.exists) {
+        throw new Error('Refresh token not found');
+      }
+      const oldRecord = oldSnap.data() as RefreshTokenRecord;
+      const newRef = this.db.collection(COLLECTION).doc(newHash);
+      const now = new Date();
+
+      tx.update(oldRef, { status: 'rotated' as RefreshTokenStatus, rotated_at: now });
+      const newRecord: RefreshTokenRecord = {
+        user_id: oldRecord.user_id,
+        email: oldRecord.email,
+        scopes: oldRecord.scopes,
+        chain_id: oldRecord.chain_id,
+        created_at: now,
+        expires_at: oldRecord.expires_at,
+        status: 'active',
+        rotated_at: null,
+      };
+      tx.set(newRef, newRecord);
+
+      return {
+        rawToken: newRawToken,
+        chainId: oldRecord.chain_id,
+        expiresAt: oldRecord.expires_at,
+      };
+    });
+  }
 }
