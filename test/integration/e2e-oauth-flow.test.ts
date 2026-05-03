@@ -70,6 +70,64 @@ function makeStoreStub() {
   };
 }
 
+function makeRefreshTokenStoreStub() {
+  type Doc = {
+    user_id: string;
+    email: string;
+    scopes: string[];
+    chain_id: string;
+    created_at: Date;
+    expires_at: Date;
+    status: 'active' | 'rotated' | 'revoked';
+    rotated_at: Date | null;
+  };
+  const docs = new Map<string, Doc>();
+  let counter = 0;
+  return {
+    issue: async (params: { userId: string; email: string; scopes: string[] }) => {
+      counter++;
+      const raw = `r-${counter}`;
+      const chainId = `chain-${counter}`;
+      const now = new Date();
+      const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      docs.set(raw, {
+        user_id: params.userId,
+        email: params.email,
+        scopes: params.scopes,
+        chain_id: chainId,
+        created_at: now,
+        expires_at: expiresAt,
+        status: 'active',
+        rotated_at: null,
+      });
+      return { rawToken: raw, chainId, expiresAt };
+    },
+    validate: async (raw: string) => {
+      const d = docs.get(raw);
+      return d ?? null;
+    },
+    rotate: async (raw: string) => {
+      const old = docs.get(raw);
+      if (!old) throw new Error('Refresh token not found');
+      docs.set(raw, { ...old, status: 'rotated', rotated_at: new Date() });
+      counter++;
+      const newRaw = `r-${counter}`;
+      docs.set(newRaw, { ...old, status: 'active', rotated_at: null, created_at: new Date() });
+      return { rawToken: newRaw, chainId: old.chain_id, expiresAt: old.expires_at };
+    },
+    revokeChain: async (chainId: string) => {
+      for (const [k, v] of docs) {
+        if (v.chain_id === chainId) docs.set(k, { ...v, status: 'revoked' });
+      }
+    },
+    revokeUser: async (userId: string) => {
+      for (const [k, v] of docs) {
+        if (v.user_id === userId) docs.set(k, { ...v, status: 'revoked' });
+      }
+    },
+  };
+}
+
 const TEST_USER_SUB = '1234567890';
 const TEST_USER_EMAIL = 'stefan@relevantsearch.com';
 
@@ -107,7 +165,14 @@ function buildTestAuthDeps() {
   const jwt = new McpJwt('test-signing-key-e2e-1234567890abcdef');
   const publicUrl = 'http://127.0.0.1:9999';
   const scopes = ['openid', 'email', 'https://www.googleapis.com/auth/drive'];
-  const provider = new DriveOAuthProvider(store, googleOAuth, jwt, publicUrl, scopes);
+  const provider = new DriveOAuthProvider(
+    store,
+    googleOAuth,
+    jwt,
+    publicUrl,
+    scopes,
+    makeRefreshTokenStoreStub() as any,
+  );
   return {
     provider,
     store,
@@ -258,6 +323,53 @@ describe('E2E OAuth 2.1 flow (mocked Google)', () => {
     const mcpBody = await mcpRes.text();
     assert.equal(mcpRes.status, 200, mcpBody);
     assert.ok(mcpRes.headers.get('mcp-session-id'));
+
+    // ── 7b. Refresh round-trip: POST /token with grant_type=refresh_token
+    const refreshTokenFromInitial = (tokens as any).refresh_token;
+    assert.ok(refreshTokenFromInitial, 'initial /token response must include refresh_token');
+
+    const refreshRes = await fetch(tokenEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshTokenFromInitial,
+        client_id: client.client_id,
+        client_secret: client.client_secret,
+      }).toString(),
+    });
+    assert.equal(refreshRes.status, 200, `refresh response: ${await refreshRes.clone().text()}`);
+    const refreshed = await refreshRes.json() as any;
+    assert.ok(refreshed.access_token, 'refresh response must include access_token');
+    assert.ok(refreshed.refresh_token, 'refresh response must include refresh_token');
+    // refresh_token MUST rotate; access_token may match if refresh happens
+    // within the same second (JWT iat/exp are second-precision and HS256 is
+    // deterministic for identical payloads).
+    assert.notEqual(refreshed.refresh_token, refreshTokenFromInitial);
+
+    // New JWT works against /mcp
+    const mcpRes2 = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${refreshed.access_token}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'e2e-test', version: '1.0.0' },
+        },
+        id: 2,
+      }),
+    });
+    assert.ok(
+      mcpRes2.status === 200 || mcpRes2.status === 202,
+      `/mcp with refreshed token: ${mcpRes2.status} ${await mcpRes2.clone().text()}`,
+    );
 
     // ── 8. Our authorization code must be single-use ────────────────
     const replayRes = await fetch(tokenEndpoint, {
