@@ -53,7 +53,7 @@ export class RefreshTokenStore {
       status: 'active',
       rotated_at: null,
     };
-    await this.db.collection(COLLECTION).doc(hashToken(rawToken)).set(record);
+    await this.db.collection(COLLECTION).doc(hashToken(rawToken)).create(record);
     return { rawToken, chainId, expiresAt };
   }
 

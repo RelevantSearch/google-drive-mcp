@@ -19,6 +19,10 @@ function makeMockFirestore() {
       _delete: () => docs.delete(path),
       get: mock.fn(async () => ({ exists: docs.has(path), data: () => docs.get(path) })),
       set: mock.fn(async (data: any) => { docs.set(path, data); }),
+      create: mock.fn(async (data: any) => {
+        if (docs.has(path)) throw new Error('already exists');
+        docs.set(path, data);
+      }),
       update: mock.fn(async (patch: any) => { docs.set(path, { ...(docs.get(path) || {}), ...patch }); }),
       delete: mock.fn(async () => { docs.delete(path); }),
     };
