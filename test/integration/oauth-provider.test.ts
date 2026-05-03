@@ -384,6 +384,8 @@ describe('DriveOAuthProvider', () => {
 
   describe('revokeToken', () => {
     it('revokes the chain when given a valid refresh token', async () => {
+      // JWT-first ordering: verify must throw before refresh-token path runs.
+      asMock(jwt.verify).mock.mockImplementation(async () => { throw new Error('not a jwt'); });
       asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
         user_id: 'u1', email: 'e1', scopes: TEST_SCOPES,
         chain_id: 'chain-x', created_at: new Date(),

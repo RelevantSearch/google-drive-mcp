@@ -221,18 +221,19 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     if (!this.refreshTokenStore) {
       return;
     }
-    // Try refresh-token path first (cheaper than JWT verify on misses)
-    const record = await this.refreshTokenStore.validate(request.token);
-    if (record) {
-      await this.refreshTokenStore.revokeChain(record.chain_id);
-      return;
-    }
-    // Fall back to access-token path
+    // Try access-token (JWT) path first - in-process HMAC verify is sub-ms,
+    // a Firestore validate() round-trip is 10-50ms.
     try {
       const payload = await this.jwt.verify(request.token);
       await this.refreshTokenStore.revokeUser(payload.sub);
+      return;
     } catch {
-      // Unknown token: RFC 7009 says return 200 silently
+      // Not our JWT (or invalid sig) - try refresh-token path
     }
+    const record = await this.refreshTokenStore.validate(request.token);
+    if (record) {
+      await this.refreshTokenStore.revokeChain(record.chain_id);
+    }
+    // If neither matches, return silently per RFC 7009
   }
 }
