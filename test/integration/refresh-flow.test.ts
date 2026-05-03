@@ -140,4 +140,29 @@ describe('exchangeRefreshToken', () => {
     assert.equal((mocks.refreshTokenStore.revokeChain as any).mock.calls.length, 0);
     assert.equal((mocks.refreshTokenStore.rotate as any).mock.calls.length, 1);
   });
+
+  it('grace window: token presented after 5s triggers chain revoke', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () => activeRecord());
+      await provider.exchangeRefreshToken(MOCK_CLIENT, 'r-init');
+
+      // After rotation, validate sees the rotated record. Within grace, this
+      // is hidden by the cache; past grace the cache entry is evicted and the
+      // rotated-status branch fires, triggering chain revoke.
+      (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () =>
+        activeRecord({ status: 'rotated', rotated_at: new Date() }));
+
+      // Advance past the 5s grace window so the eviction timer fires.
+      mock.timers.tick(6_000);
+
+      await assert.rejects(
+        () => provider.exchangeRefreshToken(MOCK_CLIENT, 'r-init'),
+        /invalid_grant|reuse|Refresh token/i,
+      );
+      assert.equal((mocks.refreshTokenStore.revokeChain as any).mock.calls.length, 1);
+    } finally {
+      mock.timers.reset();
+    }
+  });
 });
