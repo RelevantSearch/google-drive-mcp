@@ -35,16 +35,28 @@ export class DriveOAuthProvider implements OAuthServerProvider {
 
   private readonly graceCache = new Map<string, { tokens: OAuthTokens; expiresAt: number }>();
 
+  /**
+   * @param refreshTokenStore - Optional during Phase-2 transition. When
+   *   omitted, the provider degrades to access-token-only mode:
+   *   `exchangeAuthorizationCode` returns no refresh_token,
+   *   `exchangeRefreshToken` throws, and `revokeToken` is a no-op for
+   *   refresh tokens. Phase 3 will make this required and remove the
+   *   degraded mode.
+   * @deprecated Optional only during Phase 2; will become required in Phase 3.
+   */
   constructor(
     private readonly store: FirestoreStore,
     private readonly googleOAuth: GoogleOAuth,
     private readonly jwt: McpJwt,
     private readonly publicUrl: string,
     private readonly scopes: string[],
-    // Optional in Phase 2 only so Phase-3-territory call sites (src/index.ts,
-    // e2e-oauth-flow.test.ts) still compile. Phase 3 will make it required.
     private readonly refreshTokenStore?: RefreshTokenStore,
   ) {
+    if (!refreshTokenStore) {
+      console.warn(
+        'DriveOAuthProvider: refreshTokenStore not provided - refresh tokens disabled (Phase 2 degraded mode)',
+      );
+    }
     this._clientsStore = {
       getClient: async (clientId: string): Promise<OAuthClientInformationFull | undefined> => {
         const doc = await store.getOAuthClient(clientId);
