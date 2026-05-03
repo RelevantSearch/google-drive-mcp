@@ -151,20 +151,29 @@ export class RefreshTokenStore {
    * Revokes every doc sharing the given chain_id. Used on reuse detection
    * and explicit revocation by refresh-token.
    *
-   * Atomic via db.batch (up to 500 writes per batch). Filters out already-
-   * revoked docs to avoid no-op rewrites.
+   * Uses a single-field `where('chain_id', '==', x)` query (auto-indexed by
+   * Firestore) and filters out already-revoked docs in memory. We deliberately
+   * avoid a compound `where('status', 'in', [...])` because that would require
+   * a composite index, which is an infra change. Chain fanouts are small (one
+   * chain has at most a handful of rotated docs), so in-memory filtering is
+   * trivial.
+   *
+   * Atomic via db.batch (up to 500 writes per batch).
    */
   async revokeChain(chainId: string): Promise<void> {
     const snap = await this.db
       .collection(COLLECTION)
       .where('chain_id', '==', chainId)
-      .where('status', 'in', ['active', 'rotated'])
       .get();
-    if (snap.empty) return;
+    const targets = snap.docs.filter((d) => {
+      const data = d.data();
+      return data && data.status !== 'revoked';
+    });
+    if (targets.length === 0) return;
     // Firestore batches commit up to 500 writes atomically; chunk for safety.
-    for (let i = 0; i < snap.docs.length; i += 500) {
+    for (let i = 0; i < targets.length; i += 500) {
       const batch = this.db.batch();
-      for (const d of snap.docs.slice(i, i + 500)) {
+      for (const d of targets.slice(i, i + 500)) {
         batch.update(d.ref, { status: 'revoked' as RefreshTokenStatus });
       }
       await batch.commit();
@@ -175,20 +184,27 @@ export class RefreshTokenStore {
    * Revokes every chain belonging to a user. Used by revokeToken when the
    * presented token is an access JWT (not a refresh token).
    *
-   * Atomic via db.batch (up to 500 writes per batch). Filters out already-
-   * revoked docs to avoid no-op rewrites.
+   * Uses a single-field `where('user_id', '==', x)` query (auto-indexed by
+   * Firestore) and filters out already-revoked docs in memory. We deliberately
+   * avoid a compound `where('status', 'in', [...])` because that would require
+   * a composite index. User fanouts are small (a handful of chains per user).
+   *
+   * Atomic via db.batch (up to 500 writes per batch).
    */
   async revokeUser(userId: string): Promise<void> {
     const snap = await this.db
       .collection(COLLECTION)
       .where('user_id', '==', userId)
-      .where('status', 'in', ['active', 'rotated'])
       .get();
-    if (snap.empty) return;
+    const targets = snap.docs.filter((d) => {
+      const data = d.data();
+      return data && data.status !== 'revoked';
+    });
+    if (targets.length === 0) return;
     // Firestore batches commit up to 500 writes atomically; chunk for safety.
-    for (let i = 0; i < snap.docs.length; i += 500) {
+    for (let i = 0; i < targets.length; i += 500) {
       const batch = this.db.batch();
-      for (const d of snap.docs.slice(i, i + 500)) {
+      for (const d of targets.slice(i, i + 500)) {
         batch.update(d.ref, { status: 'revoked' as RefreshTokenStatus });
       }
       await batch.commit();
