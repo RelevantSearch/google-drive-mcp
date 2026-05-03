@@ -26,10 +26,11 @@ function makeMockFirestore() {
   const db = {
     collection: mock.fn((collection: string) => ({
       doc: mock.fn((docId: string) => makeDocRef(collection, docId)),
-      where: mock.fn(() => ({
+      where: mock.fn((field: string, _op: string, value: unknown) => ({
         get: mock.fn(async () => ({
           docs: Array.from(docs.entries())
             .filter(([p]) => p.startsWith(`${collection}/`))
+            .filter(([, d]) => d && d[field] === value)
             .map(([p, d]) => ({ ref: makeDocRef(collection, p.slice(collection.length + 1)), data: () => d })),
         })),
       })),
@@ -175,6 +176,44 @@ describe('RefreshTokenStore', () => {
 
     it('throws when raw token is unknown', async () => {
       await assert.rejects(() => store.rotate('unknown-token'), /not found/i);
+    });
+  });
+
+  describe('revokeChain', () => {
+    it('marks all docs sharing chainId as revoked', async () => {
+      const a = await store.issue({ userId: 'u1', email: 'e1', scopes: ['drive'] });
+      const b = await store.rotate(a.rawToken);
+      const c = await store.rotate(b.rawToken);
+      await store.revokeChain(a.chainId);
+      for (const raw of [a.rawToken, b.rawToken, c.rawToken]) {
+        const docId = createHash('sha256').update(raw).digest('base64url');
+        const record = mocks.docs.get(`refresh_tokens/${docId}`) as RefreshTokenRecord;
+        assert.equal(record.status, 'revoked', `expected ${raw.slice(0,6)} revoked`);
+      }
+    });
+
+    it('is a no-op when no docs match the chainId', async () => {
+      await store.revokeChain('nonexistent-chain');
+    });
+  });
+
+  describe('revokeUser', () => {
+    it('marks all docs for a user as revoked across multiple chains', async () => {
+      const chain1a = await store.issue({ userId: 'u1', email: 'e1', scopes: ['drive'] });
+      const chain1b = await store.rotate(chain1a.rawToken);
+      const chain2 = await store.issue({ userId: 'u1', email: 'e1', scopes: ['drive'] });
+      const otherUser = await store.issue({ userId: 'u2', email: 'e2', scopes: ['drive'] });
+
+      await store.revokeUser('u1');
+
+      for (const raw of [chain1a.rawToken, chain1b.rawToken, chain2.rawToken]) {
+        const docId = createHash('sha256').update(raw).digest('base64url');
+        const record = mocks.docs.get(`refresh_tokens/${docId}`) as RefreshTokenRecord;
+        assert.equal(record.status, 'revoked');
+      }
+      const otherDocId = createHash('sha256').update(otherUser.rawToken).digest('base64url');
+      const otherRecord = mocks.docs.get(`refresh_tokens/${otherDocId}`) as RefreshTokenRecord;
+      assert.equal(otherRecord.status, 'active');
     });
   });
 });

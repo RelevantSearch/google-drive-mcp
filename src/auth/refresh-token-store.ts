@@ -107,4 +107,34 @@ export class RefreshTokenStore {
       };
     });
   }
+
+  /**
+   * Revokes every doc sharing the given chain_id. Used on reuse detection
+   * and explicit revocation by refresh-token.
+   */
+  async revokeChain(chainId: string): Promise<void> {
+    const snap = await this.db
+      .collection(COLLECTION)
+      .where('chain_id', '==', chainId)
+      .get();
+    const writes = snap.docs.map((d) =>
+      d.ref.update({ status: 'revoked' as RefreshTokenStatus }),
+    );
+    await Promise.all(writes);
+  }
+
+  /**
+   * Revokes every chain belonging to a user. Used by revokeToken when the
+   * presented token is an access JWT (not a refresh token).
+   */
+  async revokeUser(userId: string): Promise<void> {
+    const snap = await this.db
+      .collection(COLLECTION)
+      .where('user_id', '==', userId)
+      .get();
+    const writes = snap.docs.map((d) =>
+      d.ref.update({ status: 'revoked' as RefreshTokenStatus }),
+    );
+    await Promise.all(writes);
+  }
 }
