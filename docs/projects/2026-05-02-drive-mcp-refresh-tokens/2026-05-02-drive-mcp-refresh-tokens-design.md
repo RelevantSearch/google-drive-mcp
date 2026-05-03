@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 
 # Design: Drive MCP refresh-token support
@@ -183,6 +183,8 @@ The AS-hop refresh does NOT call Google. The next tool call invokes `getUserAcce
 
 **Decoupling from Google availability**. By design, the AS hop never calls Google during refresh. This means our refresh is fast (Firestore-only) and resilient to Google outages. The trade-off: if a user revokes our app at myaccount.google.com, claude.ai's next AS-refresh will succeed but the subsequent tool call will fail with 401 (since `getUserAccessToken` will hit `InvalidGrantError` from Google). claude.ai surfaces the 401 and prompts reconnect. Worst-case latency to detection: one tool-call round-trip after revocation, generally seconds.
 
+**Multi-instance constraint**. The 5-second grace cache is in-memory per-process. Under multi-instance Cloud Run, a retry routed to a different instance would see the rotated-status doc and revoke the chain (false-positive reuse detection). The `drive-mcp` Cloud Run service must be configured with `max-instances=1` to avoid this. Follow-up: switch to a shared grace store (Firestore short-TTL doc or Memorystore) if scale-out is needed.
+
 ## Migration
 
 No DB migration. The new `refresh_tokens` collection is created on first write. On deploy:
@@ -236,6 +238,10 @@ None. Section reserved for items that surface during implementation.
 - Predecessor design: [2026-04-15 drive-mcp-team-design](../2026-04-15-drive-mcp-team/2026-04-15-drive-mcp-team-design.md)
 
 ## Changelog
+
+### v2 - 2026-05-02
+
+Added "Multi-instance constraint" note under "Decoupling from Google availability" calling out the per-process grace cache and the `max-instances=1` requirement for the `drive-mcp` Cloud Run service. Captures the migration path (Firestore short-TTL doc or Memorystore) for future scale-out.
 
 ### v1 - 2026-05-02
 

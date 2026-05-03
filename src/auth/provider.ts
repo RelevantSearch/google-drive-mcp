@@ -33,6 +33,18 @@ export class DriveOAuthProvider implements OAuthServerProvider {
 
   private _clientsStore: OAuthRegisteredClientsStore;
 
+  /**
+   * In-memory grace cache for OAuth 2.1 idempotent refresh-token retries
+   * within `GRACE_WINDOW_MS` (5s).
+   *
+   * IMPORTANT: this cache is per-process. Under multi-instance Cloud Run, a
+   * retry routed to a different instance will miss the cache, see the token
+   * as `rotated` in Firestore, and revoke the entire chain (false-positive
+   * reuse detection). The `drive-mcp` Cloud Run service is constrained to
+   * `max-instances=1` (rs_infra terraform module) to avoid this. If that
+   * constraint is relaxed, switch to a shared cache (Firestore short-TTL doc
+   * or Memorystore) BEFORE scaling out.
+   */
   private readonly graceCache = new Map<string, { tokens: OAuthTokens; expiresAt: number }>();
 
   /**
