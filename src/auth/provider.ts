@@ -16,6 +16,14 @@ import { createHash, randomBytes } from 'crypto';
  */
 export const AUTH_CODE_MAX_AGE_MS = 60_000;
 
+/**
+ * Idempotency window for refresh-token retries. If the same raw token is
+ * presented twice within this window (e.g. client retried after a transient
+ * network error), return the same token pair instead of triggering reuse
+ * detection.
+ */
+const GRACE_WINDOW_MS = 5_000;
+
 export class DriveOAuthProvider implements OAuthServerProvider {
   // Must be a getter per SDK interface
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -23,6 +31,8 @@ export class DriveOAuthProvider implements OAuthServerProvider {
   }
 
   private _clientsStore: OAuthRegisteredClientsStore;
+
+  private readonly graceCache = new Map<string, { tokens: OAuthTokens; expiresAt: number }>();
 
   constructor(
     private readonly store: FirestoreStore,
@@ -143,18 +153,22 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     if (!this.refreshTokenStore) {
       throw new Error('Refresh tokens not supported');
     }
+
+    // Idempotent retry within grace window: same raw token returns the same
+    // pair we minted on the first call, avoiding spurious reuse-detection.
+    const cached = this.graceCache.get(refreshToken);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.tokens;
+    }
+    if (cached) this.graceCache.delete(refreshToken);
+
     const record = await this.refreshTokenStore.validate(refreshToken);
-    if (!record) {
-      throw new InvalidGrantError('invalid_grant');
-    }
-    if (record.status === 'revoked') {
-      throw new InvalidGrantError('invalid_grant');
-    }
+    if (!record) throw new InvalidGrantError('invalid_grant');
+    if (record.status === 'revoked') throw new InvalidGrantError('invalid_grant');
     if (record.expires_at.getTime() < Date.now()) {
       throw new InvalidGrantError('invalid_grant');
     }
     if (record.status === 'rotated') {
-      // Reuse detected (grace window handled in Task 2.3)
       await this.refreshTokenStore.revokeChain(record.chain_id);
       throw new InvalidGrantError('invalid_grant');
     }
@@ -166,13 +180,18 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       scope: record.scopes.join(' '),
     });
 
-    return {
+    const tokens: OAuthTokens = {
       access_token: accessToken,
       refresh_token: newRefresh.rawToken,
       token_type: 'bearer',
       expires_in: 3600,
       scope: record.scopes.join(' '),
     };
+    this.graceCache.set(refreshToken, {
+      tokens,
+      expiresAt: Date.now() + GRACE_WINDOW_MS,
+    });
+    return tokens;
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {

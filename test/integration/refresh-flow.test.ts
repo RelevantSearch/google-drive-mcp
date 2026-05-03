@@ -110,4 +110,29 @@ describe('exchangeRefreshToken', () => {
       /invalid_grant/,
     );
   });
+
+  it('reuse detection: rotated token presented beyond grace revokes chain', async () => {
+    (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () =>
+      activeRecord({ status: 'rotated', rotated_at: new Date(Date.now() - 10_000) }));
+    await assert.rejects(
+      () => provider.exchangeRefreshToken(MOCK_CLIENT, 'leaked'),
+      /invalid_grant/,
+    );
+    assert.equal((mocks.refreshTokenStore.revokeChain as any).mock.calls.length, 1);
+  });
+
+  it('grace window: same raw token within 5s returns identical pair, no chain revoke', async () => {
+    (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () => activeRecord());
+    const first = await provider.exchangeRefreshToken(MOCK_CLIENT, 'r-init');
+
+    // After rotation, validate sees the now-rotated record
+    (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () =>
+      activeRecord({ status: 'rotated', rotated_at: new Date() }));
+
+    const second = await provider.exchangeRefreshToken(MOCK_CLIENT, 'r-init');
+    assert.equal(second.access_token, first.access_token);
+    assert.equal(second.refresh_token, first.refresh_token);
+    assert.equal((mocks.refreshTokenStore.revokeChain as any).mock.calls.length, 0);
+    assert.equal((mocks.refreshTokenStore.rotate as any).mock.calls.length, 1);
+  });
 });
