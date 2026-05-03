@@ -131,8 +131,11 @@ describe('RefreshTokenStore', () => {
       const expectedMax = after + 90 * 24 * 60 * 60 * 1000;
       const expectedDocId = createHash('sha256').update(result.rawToken).digest('base64url');
       const persisted = mocks.docs.get(`refresh_tokens/${expectedDocId}`) as RefreshTokenRecord;
-      assert.ok(persisted.expires_at >= expectedMin);
-      assert.ok(persisted.expires_at <= expectedMax);
+      assert.ok(persisted.expires_at instanceof Date);
+      assert.ok(persisted.expires_at.getTime() >= expectedMin);
+      assert.ok(persisted.expires_at.getTime() <= expectedMax);
+      assert.ok(result.expiresAt instanceof Date);
+      assert.equal(result.expiresAt.getTime(), persisted.expires_at.getTime());
     });
   });
 
@@ -158,7 +161,7 @@ describe('RefreshTokenStore', () => {
       const docId = createHash('sha256').update('xyz').digest('base64url');
       const expired: RefreshTokenRecord = {
         user_id: 'u', email: 'e', scopes: ['drive'],
-        chain_id: 'c', created_at: new Date(), expires_at: Date.now() + 1000,
+        chain_id: 'c', created_at: new Date(), expires_at: new Date(Date.now() + 1000),
         status: 'rotated', rotated_at: new Date(),
       };
       mocks.docs.set(`refresh_tokens/${docId}`, expired);
@@ -170,13 +173,13 @@ describe('RefreshTokenStore', () => {
       const docId = createHash('sha256').update('past').digest('base64url');
       const expired: RefreshTokenRecord = {
         user_id: 'u', email: 'e', scopes: ['drive'],
-        chain_id: 'c', created_at: new Date(), expires_at: Date.now() - 1000,
+        chain_id: 'c', created_at: new Date(), expires_at: new Date(Date.now() - 1000),
         status: 'active', rotated_at: null,
       };
       mocks.docs.set(`refresh_tokens/${docId}`, expired);
       const record = await store.validate('past');
       assert.equal(record?.status, 'active');
-      assert.ok(record!.expires_at < Date.now());
+      assert.ok(record!.expires_at.getTime() < Date.now());
     });
   });
 
@@ -193,7 +196,8 @@ describe('RefreshTokenStore', () => {
       const rotated = await store.rotate(issued.rawToken);
       assert.notEqual(rotated.rawToken, issued.rawToken);
       assert.equal(rotated.chainId, issued.chainId);
-      assert.equal(rotated.expiresAt, issued.expiresAt);
+      assert.ok(rotated.expiresAt instanceof Date);
+      assert.equal(rotated.expiresAt.getTime(), issued.expiresAt.getTime());
 
       const oldNow = mocks.docs.get(`refresh_tokens/${oldDocId}`) as RefreshTokenRecord;
       assert.equal(oldNow.status, 'rotated');
@@ -203,7 +207,8 @@ describe('RefreshTokenStore', () => {
       const newRecord = mocks.docs.get(`refresh_tokens/${newDocId}`) as RefreshTokenRecord;
       assert.equal(newRecord.status, 'active');
       assert.equal(newRecord.chain_id, oldRecord.chain_id);
-      assert.equal(newRecord.expires_at, oldRecord.expires_at);
+      assert.ok(newRecord.expires_at instanceof Date);
+      assert.equal(newRecord.expires_at.getTime(), oldRecord.expires_at.getTime());
     });
 
     it('throws InvalidGrantError when raw token is unknown', async () => {

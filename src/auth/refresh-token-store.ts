@@ -24,7 +24,7 @@ export interface IssueParams {
 export interface IssueResult {
   rawToken: string;
   chainId: string;
-  expiresAt: number;
+  expiresAt: Date;
 }
 
 function hashToken(rawToken: string): string {
@@ -42,7 +42,7 @@ export class RefreshTokenStore {
     const rawToken = generateRawToken();
     const chainId = randomUUID();
     const now = Date.now();
-    const expiresAt = now + CHAIN_TTL_MS;
+    const expiresAt = new Date(now + CHAIN_TTL_MS);
     const record: RefreshTokenRecord = {
       user_id: params.userId,
       email: params.email,

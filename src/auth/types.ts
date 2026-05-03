@@ -65,8 +65,11 @@ export interface RefreshTokenRecord {
   /** UUIDv4 shared across all rotations of one logical session. */
   chain_id: string;
   created_at: Date;
-  /** Chain TTL, copied verbatim to all rotations. Epoch ms. */
-  expires_at: number;
+  /**
+   * Chain TTL, copied verbatim to all rotations. Stored as Date so a
+   * Firestore TTL policy can target this field directly.
+   */
+  expires_at: Date;
   status: RefreshTokenStatus;
   rotated_at: Date | null;
 }
