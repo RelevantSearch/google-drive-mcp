@@ -29,10 +29,12 @@ import {
 } from './utils.js';
 import type { ToolContext } from './types.js';
 import { errorResponse } from './types.js';
+import { Firestore } from '@google-cloud/firestore';
 import { FirestoreStore } from './auth/firestore-store.js';
 import { GoogleOAuth } from './auth/google-oauth.js';
 import { McpJwt } from './auth/jwt.js';
 import { DriveOAuthProvider } from './auth/provider.js';
+import { RefreshTokenStore } from './auth/refresh-token-store.js';
 
 import * as driveTools from './tools/drive.js';
 import * as docsTools from './tools/docs.js';
@@ -922,14 +924,16 @@ function buildAuthDepsFromEnv(): AuthDeps | undefined {
     'profile',
   ];
 
-  const store = new FirestoreStore();
+  const firestore = new Firestore();
+  const store = new FirestoreStore(firestore);
+  const refreshTokenStore = new RefreshTokenStore(firestore);
   const googleOAuth = new GoogleOAuth({
     clientId: googleClientId,
     clientSecret: googleClientSecret,
     redirectUri: `${publicUrl.replace(/\/$/, '')}/oauth/google/callback`,
   });
   const jwt = new McpJwt(signingKey);
-  const provider = new DriveOAuthProvider(store, googleOAuth, jwt, publicUrl, scopes);
+  const provider = new DriveOAuthProvider(store, googleOAuth, jwt, publicUrl, scopes, refreshTokenStore);
 
   return {
     provider,
