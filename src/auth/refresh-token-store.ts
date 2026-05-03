@@ -111,30 +111,48 @@ export class RefreshTokenStore {
   /**
    * Revokes every doc sharing the given chain_id. Used on reuse detection
    * and explicit revocation by refresh-token.
+   *
+   * Atomic via db.batch (up to 500 writes per batch). Filters out already-
+   * revoked docs to avoid no-op rewrites.
    */
   async revokeChain(chainId: string): Promise<void> {
     const snap = await this.db
       .collection(COLLECTION)
       .where('chain_id', '==', chainId)
+      .where('status', 'in', ['active', 'rotated'])
       .get();
-    const writes = snap.docs.map((d) =>
-      d.ref.update({ status: 'revoked' as RefreshTokenStatus }),
-    );
-    await Promise.all(writes);
+    if (snap.empty) return;
+    // Firestore batches commit up to 500 writes atomically; chunk for safety.
+    for (let i = 0; i < snap.docs.length; i += 500) {
+      const batch = this.db.batch();
+      for (const d of snap.docs.slice(i, i + 500)) {
+        batch.update(d.ref, { status: 'revoked' as RefreshTokenStatus });
+      }
+      await batch.commit();
+    }
   }
 
   /**
    * Revokes every chain belonging to a user. Used by revokeToken when the
    * presented token is an access JWT (not a refresh token).
+   *
+   * Atomic via db.batch (up to 500 writes per batch). Filters out already-
+   * revoked docs to avoid no-op rewrites.
    */
   async revokeUser(userId: string): Promise<void> {
     const snap = await this.db
       .collection(COLLECTION)
       .where('user_id', '==', userId)
+      .where('status', 'in', ['active', 'rotated'])
       .get();
-    const writes = snap.docs.map((d) =>
-      d.ref.update({ status: 'revoked' as RefreshTokenStatus }),
-    );
-    await Promise.all(writes);
+    if (snap.empty) return;
+    // Firestore batches commit up to 500 writes atomically; chunk for safety.
+    for (let i = 0; i < snap.docs.length; i += 500) {
+      const batch = this.db.batch();
+      for (const d of snap.docs.slice(i, i + 500)) {
+        batch.update(d.ref, { status: 'revoked' as RefreshTokenStatus });
+      }
+      await batch.commit();
+    }
   }
 }

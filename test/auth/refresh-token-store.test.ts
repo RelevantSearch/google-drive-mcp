@@ -23,17 +23,31 @@ function makeMockFirestore() {
     };
   };
 
+  type Filter = (d: any) => boolean;
+  const filterFor = (field: string, op: string, value: unknown): Filter => (d) => {
+    if (!d) return false;
+    if (op === 'in' && Array.isArray(value)) return value.includes(d[field]);
+    return d[field] === value;
+  };
+  const makeQuery = (collection: string, filters: Filter[]) => ({
+    where: mock.fn((field: string, op: string, value: unknown) =>
+      makeQuery(collection, [...filters, filterFor(field, op, value)]),
+    ),
+    get: mock.fn(async () => {
+      const matched = Array.from(docs.entries())
+        .filter(([p]) => p.startsWith(`${collection}/`))
+        .filter(([, d]) => filters.every((f) => f(d)))
+        .map(([p, d]) => ({ ref: makeDocRef(collection, p.slice(collection.length + 1)), data: () => d }));
+      return { docs: matched, empty: matched.length === 0 };
+    }),
+  });
+
   const db = {
     collection: mock.fn((collection: string) => ({
       doc: mock.fn((docId: string) => makeDocRef(collection, docId)),
-      where: mock.fn((field: string, _op: string, value: unknown) => ({
-        get: mock.fn(async () => ({
-          docs: Array.from(docs.entries())
-            .filter(([p]) => p.startsWith(`${collection}/`))
-            .filter(([, d]) => d && d[field] === value)
-            .map(([p, d]) => ({ ref: makeDocRef(collection, p.slice(collection.length + 1)), data: () => d })),
-        })),
-      })),
+      where: mock.fn((field: string, op: string, value: unknown) =>
+        makeQuery(collection, [filterFor(field, op, value)]),
+      ),
     })),
     runTransaction: mock.fn(async (fn: any) => {
       const tx = {
@@ -43,6 +57,23 @@ function makeMockFirestore() {
         delete: (ref: any) => ref._delete(),
       };
       return fn(tx);
+    }),
+    batch: mock.fn(() => {
+      const ops: Array<() => void> = [];
+      return {
+        update: mock.fn((ref: any, patch: any) => {
+          ops.push(() => ref._update(patch));
+        }),
+        set: mock.fn((ref: any, data: any) => {
+          ops.push(() => ref._set(data));
+        }),
+        delete: mock.fn((ref: any) => {
+          ops.push(() => ref._delete());
+        }),
+        commit: mock.fn(async () => {
+          for (const op of ops) op();
+        }),
+      };
     }),
   } as any as Firestore;
 
