@@ -185,6 +185,36 @@ describe('RefreshTokenStore', () => {
       assert.equal(record?.status, 'active');
       assert.ok(record!.expires_at.getTime() < Date.now());
     });
+
+    it('normalises Firestore Timestamp to Date for created_at, expires_at, rotated_at', async () => {
+      // Real Firestore reads return Timestamp instances ({toDate(), toMillis()});
+      // mocks pass plain Dates. Both shapes must yield Date on the way out so
+      // callers (e.g. provider.exchangeRefreshToken) can rely on .getTime().
+      const fakeTimestamp = (ms: number) => ({
+        toDate: () => new Date(ms),
+        toMillis: () => ms,
+      });
+      const docId = createHash('sha256').update('ts-token').digest('base64url');
+      const futureMs = Date.now() + 60_000;
+      mocks.docs.set(`refresh_tokens/${docId}`, {
+        user_id: 'u',
+        email: 'e',
+        scopes: ['drive'],
+        chain_id: 'c',
+        created_at: fakeTimestamp(1000),
+        expires_at: fakeTimestamp(futureMs),
+        status: 'active',
+        rotated_at: fakeTimestamp(2000),
+      });
+      const record = await store.validate('ts-token');
+      assert.ok(record);
+      assert.ok(record.created_at instanceof Date);
+      assert.ok(record.expires_at instanceof Date);
+      assert.ok(record.rotated_at instanceof Date);
+      assert.equal(record.created_at.getTime(), 1000);
+      assert.equal(record.expires_at.getTime(), futureMs);
+      assert.equal(record.rotated_at!.getTime(), 2000);
+    });
   });
 
   describe('rotate', () => {

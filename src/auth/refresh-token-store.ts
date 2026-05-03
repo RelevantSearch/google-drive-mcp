@@ -7,7 +7,7 @@
  * db.runTransaction. Reuse of a rotated token revokes the entire chain.
  */
 
-import { Firestore } from '@google-cloud/firestore';
+import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { InvalidGrantError } from './google-oauth.js';
 import type { RefreshTokenRecord, RefreshTokenStatus } from './types.js';
@@ -33,6 +33,38 @@ function hashToken(rawToken: string): string {
 
 function generateRawToken(): string {
   return randomBytes(32).toString('base64url');
+}
+
+/**
+ * Coerces a value that may be a Firestore Timestamp, a Date, or null/undefined
+ * into a Date (or null). Real Firestore reads return Timestamp instances; tests
+ * often pass plain Dates; this normalises both so callers can always rely on
+ * Date semantics (e.g. `.getTime()`).
+ */
+function toDate(v: Date | Timestamp | null | undefined): Date | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v;
+  if (typeof (v as { toDate?: () => Date }).toDate === 'function') {
+    return (v as { toDate: () => Date }).toDate();
+  }
+  return null;
+}
+
+/**
+ * Normalises a raw Firestore document into a RefreshTokenRecord with Date
+ * fields, regardless of whether the source returned Timestamps or Dates.
+ */
+function normalizeRecord(raw: FirebaseFirestore.DocumentData): RefreshTokenRecord {
+  return {
+    user_id: raw.user_id,
+    email: raw.email,
+    scopes: raw.scopes,
+    chain_id: raw.chain_id,
+    created_at: toDate(raw.created_at) ?? new Date(0),
+    expires_at: toDate(raw.expires_at) ?? new Date(0),
+    status: raw.status,
+    rotated_at: toDate(raw.rotated_at),
+  };
 }
 
 export class RefreshTokenStore {
@@ -64,7 +96,9 @@ export class RefreshTokenStore {
   async validate(rawToken: string): Promise<RefreshTokenRecord | null> {
     const snap = await this.db.collection(COLLECTION).doc(hashToken(rawToken)).get();
     if (!snap.exists) return null;
-    return snap.data() as RefreshTokenRecord;
+    const data = snap.data();
+    if (!data) return null;
+    return normalizeRecord(data);
   }
 
   /**
@@ -84,7 +118,11 @@ export class RefreshTokenStore {
       if (!oldSnap.exists) {
         throw new InvalidGrantError('Refresh token not found');
       }
-      const oldRecord = oldSnap.data() as RefreshTokenRecord;
+      const oldData = oldSnap.data();
+      if (!oldData) {
+        throw new InvalidGrantError('Refresh token not found');
+      }
+      const oldRecord = normalizeRecord(oldData);
       const newRef = this.db.collection(COLLECTION).doc(newHash);
       const now = new Date();
 
