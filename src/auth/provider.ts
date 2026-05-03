@@ -188,6 +188,10 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       expires_in: 3600,
       scope: record.scopes.join(' '),
     };
+    // Schedule eviction so unaccessed entries don't accumulate.
+    // unref() so a pending timer doesn't block process shutdown.
+    const timer = setTimeout(() => this.graceCache.delete(refreshToken), GRACE_WINDOW_MS);
+    timer.unref();
     this.graceCache.set(refreshToken, {
       tokens,
       expiresAt: Date.now() + GRACE_WINDOW_MS,
