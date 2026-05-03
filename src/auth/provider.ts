@@ -4,7 +4,7 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Response } from 'express';
 import { FirestoreStore } from './firestore-store.js';
-import { GoogleOAuth } from './google-oauth.js';
+import { GoogleOAuth, InvalidGrantError } from './google-oauth.js';
 import { McpJwt } from './jwt.js';
 import type { RefreshTokenStore } from './refresh-token-store.js';
 import { createHash, randomBytes } from 'crypto';
@@ -134,14 +134,45 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     };
   }
 
-  // REQUIRED: must exist. For v1, we don't support refresh — return error.
   async exchangeRefreshToken(
     _client: OAuthClientInformationFull,
-    _refreshToken: string,
+    refreshToken: string,
     _scopes?: string[],
     _resource?: URL,
   ): Promise<OAuthTokens> {
-    throw new Error('Refresh tokens not supported');
+    if (!this.refreshTokenStore) {
+      throw new Error('Refresh tokens not supported');
+    }
+    const record = await this.refreshTokenStore.validate(refreshToken);
+    if (!record) {
+      throw new InvalidGrantError('invalid_grant');
+    }
+    if (record.status === 'revoked') {
+      throw new InvalidGrantError('invalid_grant');
+    }
+    if (record.expires_at.getTime() < Date.now()) {
+      throw new InvalidGrantError('invalid_grant');
+    }
+    if (record.status === 'rotated') {
+      // Reuse detected (grace window handled in Task 2.3)
+      await this.refreshTokenStore.revokeChain(record.chain_id);
+      throw new InvalidGrantError('invalid_grant');
+    }
+
+    const newRefresh = await this.refreshTokenStore.rotate(refreshToken);
+    const accessToken = await this.jwt.sign({
+      sub: record.user_id,
+      email: record.email,
+      scope: record.scopes.join(' '),
+    });
+
+    return {
+      access_token: accessToken,
+      refresh_token: newRefresh.rawToken,
+      token_type: 'bearer',
+      expires_in: 3600,
+      scope: record.scopes.join(' '),
+    };
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
