@@ -5,7 +5,7 @@
  * requireBearerAuth checks expiresAt on every request.
  */
 
-import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
+import { SignJWT, jwtVerify, decodeJwt, errors as joseErrors } from 'jose';
 
 export interface McpJwtPayload {
   sub: string;
@@ -69,10 +69,21 @@ export class McpJwt {
       return await this.verify(token);
     } catch (err) {
       if (err instanceof joseErrors.JWTExpired) {
-        // Signature was valid (jose checks sig before exp); decode the payload
-        // with an effectively-infinite clock tolerance to skip the exp check.
+        // exp has passed but the signature was already validated by the
+        // initial `verify()` call (jose checks sig before claims). To skip
+        // only the exp check while still enforcing nbf and other claims,
+        // re-verify with `currentDate` set to just after the JWT's iat.
+        // Using `clockTolerance: '100y'` would also relax nbf, which is a
+        // small but real attack surface (clock-skewed forged token).
+        // `decodeJwt` parses the payload without verifying the signature;
+        // the signature is verified by the subsequent `jwtVerify` call.
+        const unverified = decodeJwt(token);
+        const iat =
+          typeof unverified.iat === 'number'
+            ? unverified.iat
+            : Math.floor(Date.now() / 1000);
         const { payload } = await jwtVerify(token, this.secret, {
-          clockTolerance: '100y',
+          currentDate: new Date((iat + 1) * 1000),
         });
         return {
           sub: payload.sub as string,
