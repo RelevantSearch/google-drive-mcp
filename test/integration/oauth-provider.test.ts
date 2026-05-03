@@ -382,6 +382,38 @@ describe('DriveOAuthProvider', () => {
     });
   });
 
+  describe('revokeToken', () => {
+    it('revokes the chain when given a valid refresh token', async () => {
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
+        user_id: 'u1', email: 'e1', scopes: TEST_SCOPES,
+        chain_id: 'chain-x', created_at: new Date(),
+        expires_at: new Date(Date.now() + 1000), status: 'active', rotated_at: null,
+      }));
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'r-1' });
+      const chainCalls = asMock(refreshTokenStore.revokeChain).mock.calls;
+      assert.equal(chainCalls.length, 1);
+      assert.equal(chainCalls[0].arguments[0], 'chain-x');
+    });
+
+    it('revokes by user when given a valid access token (JWT)', async () => {
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      asMock(jwt.verify).mock.mockImplementation(async () => ({
+        sub: 'user-jwt', email: 'e@x', scope: TEST_SCOPES.join(' '),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }));
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'jwt-token' });
+      const userCalls = asMock(refreshTokenStore.revokeUser).mock.calls;
+      assert.equal(userCalls.length, 1);
+      assert.equal(userCalls[0].arguments[0], 'user-jwt');
+    });
+
+    it('returns silently when token is unknown (RFC 7009)', async () => {
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      asMock(jwt.verify).mock.mockImplementation(async () => { throw new Error('invalid'); });
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'garbage' });
+    });
+  });
+
   describe('verifyAccessToken', () => {
     it('returns AuthInfo with expiresAt from JWT exp', async () => {
       const expectedExp = Math.floor(Date.now() / 1000) + 3600;

@@ -205,5 +205,29 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     };
   }
 
-  // revokeToken is optional — not implemented for v1
+  /**
+   * RFC 7009 token revocation. Accepts both refresh and access tokens.
+   * Returns silently for unknown tokens (no information leak).
+   */
+  async revokeToken(
+    _client: OAuthClientInformationFull,
+    request: { token: string; token_type_hint?: string },
+  ): Promise<void> {
+    if (!this.refreshTokenStore) {
+      return;
+    }
+    // Try refresh-token path first (cheaper than JWT verify on misses)
+    const record = await this.refreshTokenStore.validate(request.token);
+    if (record) {
+      await this.refreshTokenStore.revokeChain(record.chain_id);
+      return;
+    }
+    // Fall back to access-token path
+    try {
+      const payload = await this.jwt.verify(request.token);
+      await this.refreshTokenStore.revokeUser(payload.sub);
+    } catch {
+      // Unknown token: RFC 7009 says return 200 silently
+    }
+  }
 }
