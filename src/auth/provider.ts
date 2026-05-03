@@ -4,7 +4,8 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Response } from 'express';
 import { FirestoreStore } from './firestore-store.js';
-import { GoogleOAuth, InvalidGrantError } from './google-oauth.js';
+import { GoogleOAuth } from './google-oauth.js';
+import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { McpJwt } from './jwt.js';
 import type { RefreshTokenStore } from './refresh-token-store.js';
 import { createHash, randomBytes } from 'crypto';
@@ -163,14 +164,14 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     if (cached) this.graceCache.delete(refreshToken);
 
     const record = await this.refreshTokenStore.validate(refreshToken);
-    if (!record) throw new InvalidGrantError('invalid_grant');
-    if (record.status === 'revoked') throw new InvalidGrantError('invalid_grant');
+    if (!record) throw new InvalidGrantError('Refresh token not found');
+    if (record.status === 'revoked') throw new InvalidGrantError('Refresh token revoked');
     if (record.expires_at.getTime() < Date.now()) {
-      throw new InvalidGrantError('invalid_grant');
+      throw new InvalidGrantError('Refresh token expired');
     }
     if (record.status === 'rotated') {
       await this.refreshTokenStore.revokeChain(record.chain_id);
-      throw new InvalidGrantError('invalid_grant');
+      throw new InvalidGrantError('Refresh token reuse detected');
     }
 
     const newRefresh = await this.refreshTokenStore.rotate(refreshToken);

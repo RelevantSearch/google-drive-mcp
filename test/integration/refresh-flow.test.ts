@@ -6,6 +6,7 @@ import type { GoogleOAuth } from '../../src/auth/google-oauth.js';
 import type { McpJwt } from '../../src/auth/jwt.js';
 import type { RefreshTokenRecord } from '../../src/auth/types.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 
 const TEST_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/drive'];
 const PUBLIC_URL = 'https://drive-mcp.example.com';
@@ -90,7 +91,8 @@ describe('exchangeRefreshToken', () => {
     (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () => null);
     await assert.rejects(
       () => provider.exchangeRefreshToken(MOCK_CLIENT, 'unknown'),
-      /invalid_grant/,
+      (err: unknown) =>
+        err instanceof OAuthError && (err as { errorCode: string }).errorCode === 'invalid_grant',
     );
   });
 
@@ -98,7 +100,8 @@ describe('exchangeRefreshToken', () => {
     (mocks.refreshTokenStore.validate as any).mock.mockImplementation(async () => activeRecord({ status: 'revoked' }));
     await assert.rejects(
       () => provider.exchangeRefreshToken(MOCK_CLIENT, 'revoked'),
-      /invalid_grant/,
+      (err: unknown) =>
+        err instanceof OAuthError && (err as { errorCode: string }).errorCode === 'invalid_grant',
     );
   });
 
@@ -107,7 +110,8 @@ describe('exchangeRefreshToken', () => {
       activeRecord({ expires_at: new Date(Date.now() - 1000) }));
     await assert.rejects(
       () => provider.exchangeRefreshToken(MOCK_CLIENT, 'old'),
-      /invalid_grant/,
+      (err: unknown) =>
+        err instanceof OAuthError && (err as { errorCode: string }).errorCode === 'invalid_grant',
     );
   });
 
@@ -116,7 +120,8 @@ describe('exchangeRefreshToken', () => {
       activeRecord({ status: 'rotated', rotated_at: new Date(Date.now() - 10_000) }));
     await assert.rejects(
       () => provider.exchangeRefreshToken(MOCK_CLIENT, 'leaked'),
-      /invalid_grant/,
+      (err: unknown) =>
+        err instanceof OAuthError && (err as { errorCode: string }).errorCode === 'invalid_grant',
     );
     assert.equal((mocks.refreshTokenStore.revokeChain as any).mock.calls.length, 1);
   });
