@@ -102,4 +102,48 @@ describe('RefreshTokenStore', () => {
       assert.ok(persisted.expires_at <= expectedMax);
     });
   });
+
+  describe('validate', () => {
+    it('returns the record when token is active and not expired', async () => {
+      const issued = await store.issue({
+        userId: 'user-1',
+        email: 'a@relevantsearch.com',
+        scopes: ['drive'],
+      });
+      const record = await store.validate(issued.rawToken);
+      assert.ok(record);
+      assert.equal(record.user_id, 'user-1');
+      assert.equal(record.status, 'active');
+    });
+
+    it('returns null when token does not exist', async () => {
+      const record = await store.validate('nonexistent-token');
+      assert.equal(record, null);
+    });
+
+    it('returns the record even when status is rotated (caller decides reuse)', async () => {
+      const docId = createHash('sha256').update('xyz').digest('base64url');
+      const expired: RefreshTokenRecord = {
+        user_id: 'u', email: 'e', scopes: ['drive'],
+        chain_id: 'c', created_at: new Date(), expires_at: Date.now() + 1000,
+        status: 'rotated', rotated_at: new Date(),
+      };
+      mocks.docs.set(`refresh_tokens/${docId}`, expired);
+      const record = await store.validate('xyz');
+      assert.equal(record?.status, 'rotated');
+    });
+
+    it('returns the record even when expired (caller decides expiry)', async () => {
+      const docId = createHash('sha256').update('past').digest('base64url');
+      const expired: RefreshTokenRecord = {
+        user_id: 'u', email: 'e', scopes: ['drive'],
+        chain_id: 'c', created_at: new Date(), expires_at: Date.now() - 1000,
+        status: 'active', rotated_at: null,
+      };
+      mocks.docs.set(`refresh_tokens/${docId}`, expired);
+      const record = await store.validate('past');
+      assert.equal(record?.status, 'active');
+      assert.ok(record!.expires_at < Date.now());
+    });
+  });
 });

@@ -55,4 +55,14 @@ export class RefreshTokenStore {
     await this.db.collection(COLLECTION).doc(hashToken(rawToken)).set(record);
     return { rawToken, chainId, expiresAt };
   }
+
+  /**
+   * Reads the record by raw token. Returns null if not found.
+   * Does NOT enforce expiry or status; caller branches on those fields.
+   */
+  async validate(rawToken: string): Promise<RefreshTokenRecord | null> {
+    const snap = await this.db.collection(COLLECTION).doc(hashToken(rawToken)).get();
+    if (!snap.exists) return null;
+    return snap.data() as RefreshTokenRecord;
+  }
 }
