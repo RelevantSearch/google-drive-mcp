@@ -50,6 +50,12 @@ function createMockJwt(): McpJwt {
       scope: 'openid email https://www.googleapis.com/auth/drive',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })),
+    verifyAllowExpired: mock.fn(async () => ({
+      sub: 'google-user-123',
+      email: 'user@relevantsearch.com',
+      scope: 'openid email https://www.googleapis.com/auth/drive',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })),
   } as unknown as McpJwt;
 }
 
@@ -384,8 +390,10 @@ describe('DriveOAuthProvider', () => {
 
   describe('revokeToken', () => {
     it('revokes the chain when given a valid refresh token', async () => {
-      // JWT-first ordering: verify must throw before refresh-token path runs.
-      asMock(jwt.verify).mock.mockImplementation(async () => { throw new Error('not a jwt'); });
+      // JWT-first ordering: verifyAllowExpired must throw before refresh-token path runs.
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => { throw new Error('not a jwt'); },
+      );
       asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
         user_id: 'u1', email: 'e1', scopes: TEST_SCOPES,
         chain_id: 'chain-x', created_at: new Date(),
@@ -399,19 +407,39 @@ describe('DriveOAuthProvider', () => {
 
     it('revokes by user when given a valid access token (JWT)', async () => {
       asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
-      asMock(jwt.verify).mock.mockImplementation(async () => ({
-        sub: 'user-jwt', email: 'e@x', scope: TEST_SCOPES.join(' '),
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      }));
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'user-jwt', email: 'e@x', scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      );
       await provider.revokeToken!(MOCK_CLIENT, { token: 'jwt-token' });
       const userCalls = asMock(refreshTokenStore.revokeUser).mock.calls;
       assert.equal(userCalls.length, 1);
       assert.equal(userCalls[0].arguments[0], 'user-jwt');
     });
 
+    it('revokes by user when given an expired-but-valid JWT', async () => {
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'expired-user',
+          email: 'e@x',
+          scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) - 3600, // expired 1h ago
+        }),
+      );
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'expired-jwt' });
+      const userCalls = asMock(refreshTokenStore.revokeUser).mock.calls;
+      assert.equal(userCalls.length, 1);
+      assert.equal(userCalls[0].arguments[0], 'expired-user');
+    });
+
     it('returns silently when token is unknown (RFC 7009)', async () => {
       asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
-      asMock(jwt.verify).mock.mockImplementation(async () => { throw new Error('invalid'); });
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => { throw new Error('invalid'); },
+      );
       await provider.revokeToken!(MOCK_CLIENT, { token: 'garbage' });
     });
   });

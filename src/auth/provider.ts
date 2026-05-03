@@ -222,9 +222,11 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       return;
     }
     // Try access-token (JWT) path first - in-process HMAC verify is sub-ms,
-    // a Firestore validate() round-trip is 10-50ms.
+    // a Firestore validate() round-trip is 10-50ms. Use verifyAllowExpired
+    // so an expired-but-validly-signed JWT still revokes its refresh chain
+    // per RFC 7009 §2.2.
     try {
-      const payload = await this.jwt.verify(request.token);
+      const payload = await this.jwt.verifyAllowExpired(request.token);
       await this.refreshTokenStore.revokeUser(payload.sub);
       return;
     } catch {

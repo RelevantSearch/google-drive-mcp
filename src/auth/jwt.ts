@@ -5,7 +5,7 @@
  * requireBearerAuth checks expiresAt on every request.
  */
 
-import { SignJWT, jwtVerify } from 'jose';
+import { SignJWT, jwtVerify, errors as joseErrors } from 'jose';
 
 export interface McpJwtPayload {
   sub: string;
@@ -56,5 +56,32 @@ export class McpJwt {
       scope: payload.scope as string,
       exp: payload.exp as number,
     };
+  }
+
+  /**
+   * Verifies signature; returns payload even if `exp` has passed.
+   * Throws on bad signature or any other validation failure.
+   * Used by token revocation per RFC 7009 to revoke chains for
+   * recently-expired access tokens.
+   */
+  async verifyAllowExpired(token: string): Promise<McpJwtPayload> {
+    try {
+      return await this.verify(token);
+    } catch (err) {
+      if (err instanceof joseErrors.JWTExpired) {
+        // Signature was valid (jose checks sig before exp); decode the payload
+        // with an effectively-infinite clock tolerance to skip the exp check.
+        const { payload } = await jwtVerify(token, this.secret, {
+          clockTolerance: '100y',
+        });
+        return {
+          sub: payload.sub as string,
+          email: payload.email as string,
+          scope: payload.scope as string,
+          exp: payload.exp as number,
+        };
+      }
+      throw err;
+    }
   }
 }
