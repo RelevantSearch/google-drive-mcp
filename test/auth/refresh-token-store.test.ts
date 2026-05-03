@@ -2,7 +2,7 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { RefreshTokenStore } from '../../src/auth/refresh-token-store.js';
-import { InvalidGrantError } from '../../src/auth/google-oauth.js';
+import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Firestore } from '@google-cloud/firestore';
 import type { RefreshTokenRecord } from '../../src/auth/types.js';
 

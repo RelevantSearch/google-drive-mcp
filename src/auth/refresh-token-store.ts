@@ -9,7 +9,7 @@
 
 import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { InvalidGrantError } from './google-oauth.js';
+import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { RefreshTokenRecord, RefreshTokenStatus } from './types.js';
 
 const COLLECTION = 'refresh_tokens';
