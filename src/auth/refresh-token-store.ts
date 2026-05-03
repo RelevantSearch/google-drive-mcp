@@ -9,6 +9,7 @@
 
 import { Firestore } from '@google-cloud/firestore';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { InvalidGrantError } from './google-oauth.js';
 import type { RefreshTokenRecord, RefreshTokenStatus } from './types.js';
 
 const COLLECTION = 'refresh_tokens';
@@ -81,7 +82,7 @@ export class RefreshTokenStore {
       const oldRef = this.db.collection(COLLECTION).doc(oldHash);
       const oldSnap = await tx.get(oldRef);
       if (!oldSnap.exists) {
-        throw new Error('Refresh token not found');
+        throw new InvalidGrantError('Refresh token not found');
       }
       const oldRecord = oldSnap.data() as RefreshTokenRecord;
       const newRef = this.db.collection(COLLECTION).doc(newHash);

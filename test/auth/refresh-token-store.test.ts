@@ -2,6 +2,7 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { RefreshTokenStore } from '../../src/auth/refresh-token-store.js';
+import { InvalidGrantError } from '../../src/auth/google-oauth.js';
 import type { Firestore } from '@google-cloud/firestore';
 import type { RefreshTokenRecord } from '../../src/auth/types.js';
 
@@ -205,8 +206,11 @@ describe('RefreshTokenStore', () => {
       assert.equal(newRecord.expires_at, oldRecord.expires_at);
     });
 
-    it('throws when raw token is unknown', async () => {
-      await assert.rejects(() => store.rotate('unknown-token'), /not found/i);
+    it('throws InvalidGrantError when raw token is unknown', async () => {
+      await assert.rejects(
+        () => store.rotate('unknown-token'),
+        (err: unknown) => err instanceof InvalidGrantError && /not found/i.test((err as Error).message),
+      );
     });
   });
 
