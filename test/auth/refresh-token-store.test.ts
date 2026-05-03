@@ -1,0 +1,105 @@
+import { describe, it, beforeEach, mock } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { RefreshTokenStore } from '../../src/auth/refresh-token-store.js';
+import type { Firestore } from '@google-cloud/firestore';
+import type { RefreshTokenRecord } from '../../src/auth/types.js';
+
+function makeMockFirestore() {
+  const docs = new Map<string, any>();
+
+  const makeDocRef = (collection: string, docId: string) => {
+    const path = `${collection}/${docId}`;
+    return {
+      _path: path,
+      _get: () => ({ exists: docs.has(path), data: () => docs.get(path) }),
+      _set: (data: any) => docs.set(path, data),
+      _update: (patch: any) => docs.set(path, { ...(docs.get(path) || {}), ...patch }),
+      _delete: () => docs.delete(path),
+      get: mock.fn(async () => ({ exists: docs.has(path), data: () => docs.get(path) })),
+      set: mock.fn(async (data: any) => { docs.set(path, data); }),
+      update: mock.fn(async (patch: any) => { docs.set(path, { ...(docs.get(path) || {}), ...patch }); }),
+      delete: mock.fn(async () => { docs.delete(path); }),
+    };
+  };
+
+  const db = {
+    collection: mock.fn((collection: string) => ({
+      doc: mock.fn((docId: string) => makeDocRef(collection, docId)),
+      where: mock.fn(() => ({
+        get: mock.fn(async () => ({
+          docs: Array.from(docs.entries())
+            .filter(([p]) => p.startsWith(`${collection}/`))
+            .map(([p, d]) => ({ ref: makeDocRef(collection, p.slice(collection.length + 1)), data: () => d })),
+        })),
+      })),
+    })),
+    runTransaction: mock.fn(async (fn: any) => {
+      const tx = {
+        get: (ref: any) => Promise.resolve(ref._get()),
+        update: (ref: any, patch: any) => ref._update(patch),
+        set: (ref: any, data: any) => ref._set(data),
+        delete: (ref: any) => ref._delete(),
+      };
+      return fn(tx);
+    }),
+  } as any as Firestore;
+
+  return { db, docs };
+}
+
+describe('RefreshTokenStore', () => {
+  let mocks: ReturnType<typeof makeMockFirestore>;
+  let store: RefreshTokenStore;
+
+  beforeEach(() => {
+    mocks = makeMockFirestore();
+    store = new RefreshTokenStore(mocks.db);
+  });
+
+  describe('issue', () => {
+    it('returns a base64url raw token of at least 32 bytes', async () => {
+      const result = await store.issue({
+        userId: 'user-1',
+        email: 'a@relevantsearch.com',
+        scopes: ['drive'],
+      });
+      assert.match(result.rawToken, /^[A-Za-z0-9_-]{43,}$/);
+      assert.equal(typeof result.chainId, 'string');
+      assert.ok(result.chainId.length >= 32);
+    });
+
+    it('persists a doc keyed by SHA-256(rawToken) with status=active', async () => {
+      const result = await store.issue({
+        userId: 'user-1',
+        email: 'a@relevantsearch.com',
+        scopes: ['drive'],
+      });
+      const expectedDocId = createHash('sha256').update(result.rawToken).digest('base64url');
+      const persisted = mocks.docs.get(`refresh_tokens/${expectedDocId}`) as RefreshTokenRecord;
+      assert.ok(persisted, 'doc should be persisted');
+      assert.equal(persisted.user_id, 'user-1');
+      assert.equal(persisted.email, 'a@relevantsearch.com');
+      assert.deepEqual(persisted.scopes, ['drive']);
+      assert.equal(persisted.chain_id, result.chainId);
+      assert.equal(persisted.status, 'active');
+      assert.equal(persisted.rotated_at, null);
+    });
+
+    it('sets expires_at 90 days from now', async () => {
+      const before = Date.now();
+      const result = await store.issue({
+        userId: 'user-1',
+        email: 'a@relevantsearch.com',
+        scopes: ['drive'],
+      });
+      const after = Date.now();
+      const expectedMin = before + 90 * 24 * 60 * 60 * 1000;
+      const expectedMax = after + 90 * 24 * 60 * 60 * 1000;
+      const expectedDocId = createHash('sha256').update(result.rawToken).digest('base64url');
+      const persisted = mocks.docs.get(`refresh_tokens/${expectedDocId}`) as RefreshTokenRecord;
+      assert.ok(persisted.expires_at >= expectedMin);
+      assert.ok(persisted.expires_at <= expectedMax);
+    });
+  });
+});
