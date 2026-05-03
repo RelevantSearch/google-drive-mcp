@@ -442,6 +442,26 @@ describe('DriveOAuthProvider', () => {
       );
       await provider.revokeToken!(MOCK_CLIENT, { token: 'garbage' });
     });
+
+    it('JWT path takes precedence over refresh-token path on ambiguous token', async () => {
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'jwt-user', email: 'e@x', scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      );
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
+        user_id: 'rt-user', email: 'rt@x', scopes: TEST_SCOPES,
+        chain_id: 'chain-y', created_at: new Date(),
+        expires_at: new Date(Date.now() + 1000), status: 'active', rotated_at: null,
+      }));
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'ambiguous' });
+      // JWT wins: revokeUser called with the JWT subject.
+      assert.equal(asMock(refreshTokenStore.revokeUser).mock.calls.length, 1);
+      assert.equal(asMock(refreshTokenStore.revokeUser).mock.calls[0].arguments[0], 'jwt-user');
+      // Refresh-token path is NOT invoked when the JWT path succeeds.
+      assert.equal(asMock(refreshTokenStore.revokeChain).mock.calls.length, 0);
+    });
   });
 
   describe('verifyAccessToken', () => {
