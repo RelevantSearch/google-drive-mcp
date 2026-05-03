@@ -6,6 +6,7 @@ import type { Response } from 'express';
 import { FirestoreStore } from './firestore-store.js';
 import { GoogleOAuth } from './google-oauth.js';
 import { McpJwt } from './jwt.js';
+import type { RefreshTokenStore } from './refresh-token-store.js';
 import { createHash, randomBytes } from 'crypto';
 
 /**
@@ -29,6 +30,9 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     private readonly jwt: McpJwt,
     private readonly publicUrl: string,
     private readonly scopes: string[],
+    // Optional in Phase 2 only so Phase-3-territory call sites (src/index.ts,
+    // e2e-oauth-flow.test.ts) still compile. Phase 3 will make it required.
+    private readonly refreshTokenStore?: RefreshTokenStore,
   ) {
     this._clientsStore = {
       getClient: async (clientId: string): Promise<OAuthClientInformationFull | undefined> => {
@@ -112,9 +116,18 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       scope: this.scopes.join(' '),
     });
 
+    const refresh = this.refreshTokenStore
+      ? await this.refreshTokenStore.issue({
+          userId: record.user_id,
+          email: record.email,
+          scopes: this.scopes,
+        })
+      : undefined;
+
     // Return snake_case OAuthTokens per RFC
     return {
       access_token: accessToken,
+      ...(refresh ? { refresh_token: refresh.rawToken } : {}),
       token_type: 'bearer',
       expires_in: 3600,
       scope: this.scopes.join(' '),

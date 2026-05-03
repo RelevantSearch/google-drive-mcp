@@ -53,6 +53,24 @@ function createMockJwt(): McpJwt {
   } as unknown as McpJwt;
 }
 
+function createMockRefreshTokenStore() {
+  return {
+    issue: mock.fn(async (_p: any) => ({
+      rawToken: 'mock-refresh-token-raw',
+      chainId: 'mock-chain-id',
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })),
+    validate: mock.fn(async (_t: string) => null),
+    rotate: mock.fn(async (_t: string) => ({
+      rawToken: 'mock-rotated-token-raw',
+      chainId: 'mock-chain-id',
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })),
+    revokeChain: mock.fn(async (_c: string) => {}),
+    revokeUser: mock.fn(async (_u: string) => {}),
+  };
+}
+
 const TEST_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/drive'];
 const PUBLIC_URL = 'https://drive-mcp.example.com';
 
@@ -67,12 +85,16 @@ describe('DriveOAuthProvider', () => {
   let googleOAuth: GoogleOAuth;
   let jwt: McpJwt;
   let provider: DriveOAuthProvider;
+  let refreshTokenStore: ReturnType<typeof createMockRefreshTokenStore>;
 
   beforeEach(() => {
     store = createMockStore();
     googleOAuth = createMockGoogleOAuth();
     jwt = createMockJwt();
-    provider = new DriveOAuthProvider(store, googleOAuth, jwt, PUBLIC_URL, TEST_SCOPES);
+    refreshTokenStore = createMockRefreshTokenStore();
+    provider = new DriveOAuthProvider(
+      store, googleOAuth, jwt, PUBLIC_URL, TEST_SCOPES, refreshTokenStore as any,
+    );
   });
 
   describe('clientsStore getter', () => {
@@ -329,15 +351,34 @@ describe('DriveOAuthProvider', () => {
     });
   });
 
-  describe('exchangeRefreshToken', () => {
-    it('throws "Refresh tokens not supported"', async () => {
-      await assert.rejects(
-        () => provider.exchangeRefreshToken(MOCK_CLIENT, 'some-refresh-token'),
-        (err: Error) => {
-          assert.ok(err.message.includes('Refresh tokens not supported'));
-          return true;
-        },
-      );
+  describe('exchangeAuthorizationCode (with refresh token)', () => {
+    beforeEach(() => {
+      asMock(store.consumeAuthorizationCode).mock.mockImplementation(async () => ({
+        claude_code_challenge: 'cc',
+        user_id: 'google-user-123',
+        email: 'user@relevantsearch.com',
+        google_access_token: 'g-access',
+        google_refresh_token: 'g-refresh',
+        google_token_expires_at: Math.floor(Date.now() / 1000) + 3600,
+        created_at: new Date(),
+      }));
+    });
+
+    it('returns both access_token and refresh_token', async () => {
+      const tokens = await provider.exchangeAuthorizationCode(MOCK_CLIENT, 'some-auth-code');
+      assert.equal(tokens.access_token, 'mock-jwt-token');
+      assert.equal(tokens.refresh_token, 'mock-refresh-token-raw');
+      assert.equal(tokens.expires_in, 3600);
+    });
+
+    it('issues refresh token with the user identity from the auth-code record', async () => {
+      await provider.exchangeAuthorizationCode(MOCK_CLIENT, 'some-auth-code');
+      const issueCalls = asMock(refreshTokenStore.issue).mock.calls;
+      assert.equal(issueCalls.length, 1);
+      const issuedWith = issueCalls[0].arguments[0] as any;
+      assert.equal(issuedWith.userId, 'google-user-123');
+      assert.equal(issuedWith.email, 'user@relevantsearch.com');
+      assert.deepEqual(issuedWith.scopes, TEST_SCOPES);
     });
   });
 
