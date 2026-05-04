@@ -888,7 +888,7 @@ const ListGoogleDocsSchema = z.object({
     "name",
     "modifiedTime", "modifiedTime desc",
     "createdTime", "createdTime desc"
-  ]).optional().default("modifiedTime desc").describe("Sort order. Append ' desc' for descending. Defaults to 'modifiedTime desc' (most recent first)."),
+  ]).optional().default("modifiedTime desc").describe("Sort order. Time fields support a ' desc' suffix for newest-first; 'name' is ascending only. Defaults to 'modifiedTime desc' (most recent first)."),
   ownedByMe: z.boolean().optional().describe("When true, restrict to docs owned by the authenticated user. Use when the prompt asks for 'my docs' / 'docs I own'. Leave unset for broader org-wide queries (shared drives, docs shared with the user).")
 });
 
@@ -1314,7 +1314,7 @@ export const toolDefinitions: ToolDefinition[] = [
         orderBy: {
           type: "string",
           enum: ["name", "modifiedTime", "modifiedTime desc", "createdTime", "createdTime desc"],
-          description: "Sort order. Append ' desc' for descending. Default: 'modifiedTime desc' (most recent first)."
+          description: "Sort order. Time fields support a ' desc' suffix for newest-first; 'name' is ascending only. Default: 'modifiedTime desc' (most recent first)."
         },
         ownedByMe: {
           type: "boolean",
