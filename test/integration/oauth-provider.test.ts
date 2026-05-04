@@ -50,7 +50,31 @@ function createMockJwt(): McpJwt {
       scope: 'openid email https://www.googleapis.com/auth/drive',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })),
+    verifyAllowExpired: mock.fn(async () => ({
+      sub: 'google-user-123',
+      email: 'user@relevantsearch.com',
+      scope: 'openid email https://www.googleapis.com/auth/drive',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })),
   } as unknown as McpJwt;
+}
+
+function createMockRefreshTokenStore() {
+  return {
+    issue: mock.fn(async (_p: any) => ({
+      rawToken: 'mock-refresh-token-raw',
+      chainId: 'mock-chain-id',
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })),
+    validate: mock.fn(async (_t: string) => null),
+    rotate: mock.fn(async (_t: string) => ({
+      rawToken: 'mock-rotated-token-raw',
+      chainId: 'mock-chain-id',
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })),
+    revokeChain: mock.fn(async (_c: string) => {}),
+    revokeUser: mock.fn(async (_u: string) => {}),
+  };
 }
 
 const TEST_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/drive'];
@@ -67,12 +91,16 @@ describe('DriveOAuthProvider', () => {
   let googleOAuth: GoogleOAuth;
   let jwt: McpJwt;
   let provider: DriveOAuthProvider;
+  let refreshTokenStore: ReturnType<typeof createMockRefreshTokenStore>;
 
   beforeEach(() => {
     store = createMockStore();
     googleOAuth = createMockGoogleOAuth();
     jwt = createMockJwt();
-    provider = new DriveOAuthProvider(store, googleOAuth, jwt, PUBLIC_URL, TEST_SCOPES);
+    refreshTokenStore = createMockRefreshTokenStore();
+    provider = new DriveOAuthProvider(
+      store, googleOAuth, jwt, PUBLIC_URL, TEST_SCOPES, refreshTokenStore as any,
+    );
   });
 
   describe('clientsStore getter', () => {
@@ -329,15 +357,110 @@ describe('DriveOAuthProvider', () => {
     });
   });
 
-  describe('exchangeRefreshToken', () => {
-    it('throws "Refresh tokens not supported"', async () => {
-      await assert.rejects(
-        () => provider.exchangeRefreshToken(MOCK_CLIENT, 'some-refresh-token'),
-        (err: Error) => {
-          assert.ok(err.message.includes('Refresh tokens not supported'));
-          return true;
-        },
+  describe('exchangeAuthorizationCode (with refresh token)', () => {
+    beforeEach(() => {
+      asMock(store.consumeAuthorizationCode).mock.mockImplementation(async () => ({
+        claude_code_challenge: 'cc',
+        user_id: 'google-user-123',
+        email: 'user@relevantsearch.com',
+        google_access_token: 'g-access',
+        google_refresh_token: 'g-refresh',
+        google_token_expires_at: Math.floor(Date.now() / 1000) + 3600,
+        created_at: new Date(),
+      }));
+    });
+
+    it('returns both access_token and refresh_token', async () => {
+      const tokens = await provider.exchangeAuthorizationCode(MOCK_CLIENT, 'some-auth-code');
+      assert.equal(tokens.access_token, 'mock-jwt-token');
+      assert.equal(tokens.refresh_token, 'mock-refresh-token-raw');
+      assert.equal(tokens.expires_in, 3600);
+    });
+
+    it('issues refresh token with the user identity from the auth-code record', async () => {
+      await provider.exchangeAuthorizationCode(MOCK_CLIENT, 'some-auth-code');
+      const issueCalls = asMock(refreshTokenStore.issue).mock.calls;
+      assert.equal(issueCalls.length, 1);
+      const issuedWith = issueCalls[0].arguments[0] as any;
+      assert.equal(issuedWith.userId, 'google-user-123');
+      assert.equal(issuedWith.email, 'user@relevantsearch.com');
+      assert.deepEqual(issuedWith.scopes, TEST_SCOPES);
+    });
+  });
+
+  describe('revokeToken', () => {
+    it('revokes the chain when given a valid refresh token', async () => {
+      // JWT-first ordering: verifyAllowExpired must throw before refresh-token path runs.
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => { throw new Error('not a jwt'); },
       );
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
+        user_id: 'u1', email: 'e1', scopes: TEST_SCOPES,
+        chain_id: 'chain-x', created_at: new Date(),
+        expires_at: new Date(Date.now() + 1000), status: 'active', rotated_at: null,
+      }));
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'r-1' });
+      const chainCalls = asMock(refreshTokenStore.revokeChain).mock.calls;
+      assert.equal(chainCalls.length, 1);
+      assert.equal(chainCalls[0].arguments[0], 'chain-x');
+    });
+
+    it('revokes by user when given a valid access token (JWT)', async () => {
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'user-jwt', email: 'e@x', scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      );
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'jwt-token' });
+      const userCalls = asMock(refreshTokenStore.revokeUser).mock.calls;
+      assert.equal(userCalls.length, 1);
+      assert.equal(userCalls[0].arguments[0], 'user-jwt');
+    });
+
+    it('revokes by user when given an expired-but-valid JWT', async () => {
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'expired-user',
+          email: 'e@x',
+          scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) - 3600, // expired 1h ago
+        }),
+      );
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'expired-jwt' });
+      const userCalls = asMock(refreshTokenStore.revokeUser).mock.calls;
+      assert.equal(userCalls.length, 1);
+      assert.equal(userCalls[0].arguments[0], 'expired-user');
+    });
+
+    it('returns silently when token is unknown (RFC 7009)', async () => {
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => null);
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => { throw new Error('invalid'); },
+      );
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'garbage' });
+    });
+
+    it('JWT path takes precedence over refresh-token path on ambiguous token', async () => {
+      asMock((jwt as unknown as { verifyAllowExpired: unknown }).verifyAllowExpired).mock.mockImplementation(
+        async () => ({
+          sub: 'jwt-user', email: 'e@x', scope: TEST_SCOPES.join(' '),
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      );
+      asMock(refreshTokenStore.validate).mock.mockImplementation(async () => ({
+        user_id: 'rt-user', email: 'rt@x', scopes: TEST_SCOPES,
+        chain_id: 'chain-y', created_at: new Date(),
+        expires_at: new Date(Date.now() + 1000), status: 'active', rotated_at: null,
+      }));
+      await provider.revokeToken!(MOCK_CLIENT, { token: 'ambiguous' });
+      // JWT wins: revokeUser called with the JWT subject.
+      assert.equal(asMock(refreshTokenStore.revokeUser).mock.calls.length, 1);
+      assert.equal(asMock(refreshTokenStore.revokeUser).mock.calls[0].arguments[0], 'jwt-user');
+      // Refresh-token path is NOT invoked when the JWT path succeeds.
+      assert.equal(asMock(refreshTokenStore.revokeChain).mock.calls.length, 0);
     });
   });
 

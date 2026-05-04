@@ -53,3 +53,23 @@ export interface UserContext {
   email: string;
   scope: string;
 }
+
+/** Lifecycle state of a refresh-token document. */
+export type RefreshTokenStatus = 'active' | 'rotated' | 'revoked';
+
+/** Persisted in Firestore `refresh_tokens` collection (keyed by SHA-256 hash of raw token). */
+export interface RefreshTokenRecord {
+  user_id: string;
+  email: string;
+  scopes: string[];
+  /** UUIDv4 shared across all rotations of one logical session. */
+  chain_id: string;
+  created_at: Date;
+  /**
+   * Chain TTL, copied verbatim to all rotations. Stored as Date so a
+   * Firestore TTL policy can target this field directly.
+   */
+  expires_at: Date;
+  status: RefreshTokenStatus;
+  rotated_at: Date | null;
+}
