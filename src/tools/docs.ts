@@ -884,7 +884,12 @@ const InsertLocalImageSchema = z.object({
 const ListGoogleDocsSchema = z.object({
   maxResults: z.number().int().min(1).max(100).optional().default(20).describe("Maximum number of documents to return (1-100)."),
   query: z.string().optional().describe("Search query to filter documents by name or content."),
-  orderBy: z.enum(["name", "modifiedTime", "createdTime"]).optional().default("modifiedTime").describe("Sort order for results.")
+  orderBy: z.enum([
+    "name",
+    "modifiedTime", "modifiedTime desc",
+    "createdTime", "createdTime desc"
+  ]).optional().default("modifiedTime desc").describe("Sort order. Time fields support a ' desc' suffix for newest-first; 'name' is ascending only. Defaults to 'modifiedTime desc' (most recent first)."),
+  ownedByMe: z.boolean().optional().describe("When true, restrict to docs owned by the authenticated user. Use when the prompt asks for 'my docs' / 'docs I own'. Leave unset for broader org-wide queries (shared drives, docs shared with the user).")
 });
 
 const GetDocumentInfoSchema = z.object({
@@ -1300,13 +1305,21 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "listGoogleDocs",
-    description: "Lists Google Documents from your Google Drive with optional filtering.",
+    description: "Lists Google Documents from your Google Drive with optional filtering. Defaults to most-recently-modified first across all docs you can see (including shared drives and docs shared with you). Set ownedByMe=true to restrict to docs you own.",
     inputSchema: {
       type: "object",
       properties: {
-        maxResults: { type: "integer", description: "Maximum number of documents to return (1-100)." },
+        maxResults: { type: "integer", description: "Maximum number of documents to return (1-100). Default: 20." },
         query: { type: "string", description: "Search query to filter documents by name or content." },
-        orderBy: { type: "string", enum: ["name", "modifiedTime", "createdTime"], description: "Sort order for results." }
+        orderBy: {
+          type: "string",
+          enum: ["name", "modifiedTime", "modifiedTime desc", "createdTime", "createdTime desc"],
+          description: "Sort order. Time fields support a ' desc' suffix for newest-first; 'name' is ascending only. Default: 'modifiedTime desc' (most recent first)."
+        },
+        ownedByMe: {
+          type: "boolean",
+          description: "When true, restrict to docs owned by the authenticated user. Use when the prompt asks for 'my docs' / 'docs I own'."
+        }
       },
       required: []
     }
@@ -2984,11 +2997,14 @@ export async function handleTool(toolName: string, args: Record<string, unknown>
         const escapedQuery = escapeDriveQuery(a.query);
         queryString += ` and (name contains '${escapedQuery}' or fullText contains '${escapedQuery}')`;
       }
+      if (a.ownedByMe) {
+        queryString += " and 'me' in owners";
+      }
 
       const response = await ctx.getDrive().files.list({
         q: queryString,
         pageSize: a.maxResults,
-        orderBy: a.orderBy === 'name' ? 'name' : a.orderBy,
+        orderBy: a.orderBy,
         fields: 'files(id,name,modifiedTime,createdTime,size,webViewLink,owners(displayName,emailAddress))',
         supportsAllDrives: true,
         includeItemsFromAllDrives: true
