@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **transport:** return 404 (not 400) when an `Mcp-Session-Id` references an unknown or expired session. Per the streamable-HTTP spec, this signals the client to re-initialize a session transparently. Previously, claude.ai surfaced "connector unavailable" and required a manual reconnect after the 30-min idle timeout.
+- **transport:** DELETE on unknown session ID now returns 200 (idempotent) instead of 400.
+- **transport:** trust two proxy hops (`app.set('trust proxy', 2)`) covering GCLB + Cloud Run frontend. Without this, `express-rate-limit` (used inside `mcpAuthRouter`) emitted `ValidationError` on every request and collapsed all users into one shared rate-limit bucket keyed on the LB IP. `trust proxy: true` is unsafe here because GCLB appends to inbound `X-Forwarded-For` rather than stripping it, so a leftmost spoofed entry would otherwise become `req.ip`.
+
 ## [2.1.0](https://github.com/piotr-agier/google-drive-mcp/compare/v2.0.2...v2.1.0) (2026-04-14)
 
 ### Features

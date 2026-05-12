@@ -692,6 +692,14 @@ interface HttpSession {
  */
 const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+/**
+ * JSON-RPC server-defined error code (the -32000..-32099 range is reserved for
+ * application errors per JSON-RPC 2.0). Returned alongside HTTP 404 when a
+ * client presents an unknown or expired `Mcp-Session-Id` so the client knows
+ * to re-initialize.
+ */
+const JSONRPC_SESSION_NOT_FOUND = -32001;
+
 interface CreateHttpAppOptions {
   sessionIdleTimeoutMs?: number;
   /**
@@ -707,6 +715,15 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   const idleTimeoutMs = options?.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS;
   const authDeps = options?.authDeps;
   const app = createMcpExpressApp({ host });
+  // Cloud Run + GCLB sit in front. Two trusted proxies append to
+  // X-Forwarded-For: the global external HTTPS LB and the Cloud Run frontend.
+  // GCLB *appends* to any inbound XFF rather than stripping it, so
+  // `trust proxy: true` would pick a client-spoofed leftmost entry as req.ip
+  // and rate-limit keying becomes attacker-controlled
+  // (see express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY).
+  // Stripping exactly 2 trusted hops leaves the LB-attested client IP.
+  // If this service is ever deployed without GCLB (direct *.run.app), drop to 1.
+  app.set('trust proxy', 2);
   const sessions = new Map<string, HttpSession>();
   const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -772,7 +789,21 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
         return;
       }
 
-      // New session: only accept initialize requests
+      // Session ID supplied but unknown (server-side timeout, instance recycle,
+      // or moved to a different instance). Per streamable-HTTP spec the server
+      // MUST respond 404 so the client knows to re-initialize. Returning 400
+      // here is what previously made claude.ai surface "connector unavailable"
+      // and require a manual reconnect.
+      if (sessionId) {
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
+          id: null,
+        });
+        return;
+      }
+
+      // No session ID at all — must be an initialize request
       if (!isInitializeRequest(req.body)) {
         res.status(400).json({
           jsonrpc: '2.0',
@@ -823,10 +854,20 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.get('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
+      if (!sessionId) {
+        // No session header is a protocol error — GET requires a session.
         res.status(400).json({
           jsonrpc: '2.0',
-          error: { code: -32600, message: 'Bad Request: missing or invalid session ID' },
+          error: { code: -32600, message: 'Bad Request: missing session ID' },
+          id: null,
+        });
+        return;
+      }
+      if (!sessions.has(sessionId)) {
+        // Known-but-expired session: 404 tells the client to re-initialize.
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
           id: null,
         });
         return;
@@ -849,12 +890,19 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.delete('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
+      if (!sessionId) {
         res.status(400).json({
           jsonrpc: '2.0',
-          error: { code: -32600, message: 'Bad Request: missing or invalid session ID' },
+          error: { code: -32600, message: 'Bad Request: missing session ID' },
           id: null,
         });
+        return;
+      }
+      if (!sessions.has(sessionId)) {
+        // Already gone. DELETE is semantically idempotent; returning 200
+        // here so clients reconciling state on shutdown or after a server-side
+        // timeout don't see spurious failures.
+        res.status(200).end();
         return;
       }
       const session = sessions.get(sessionId)!;
