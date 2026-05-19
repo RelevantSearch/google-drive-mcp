@@ -700,8 +700,38 @@ const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
  */
 const JSONRPC_SESSION_NOT_FOUND = -32001;
 
+/** Default trust-proxy hop count for our Cloud Run + GCLB deploy topology. */
+const DEFAULT_TRUST_PROXY_HOPS = 2;
+
+/**
+ * Determine trust-proxy hops in priority order: explicit option > env var >
+ * default. Non-negative integer required. Falls back to default on parse error.
+ */
+function resolveTrustProxyHops(options?: { trustProxyHops?: number }): number {
+  if (typeof options?.trustProxyHops === 'number' && options.trustProxyHops >= 0) {
+    return Math.floor(options.trustProxyHops);
+  }
+  const envRaw = process.env.MCP_TRUST_PROXY_HOPS;
+  if (envRaw !== undefined) {
+    const parsed = parseInt(envRaw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    console.warn(
+      `[trust-proxy] MCP_TRUST_PROXY_HOPS="${envRaw}" is not a non-negative integer; falling back to default ${DEFAULT_TRUST_PROXY_HOPS}.`,
+    );
+  }
+  return DEFAULT_TRUST_PROXY_HOPS;
+}
+
 interface CreateHttpAppOptions {
   sessionIdleTimeoutMs?: number;
+  /**
+   * Number of trusted proxy hops to strip from X-Forwarded-For. Defaults
+   * to `MCP_TRUST_PROXY_HOPS` env var if set (parsed as integer), else 2
+   * which is correct for our Cloud Run + GCLB topology. Set to 1 if
+   * deployed without a load balancer (direct *.run.app). 0 disables trust
+   * proxy entirely and will re-trigger express-rate-limit ValidationError.
+   */
+  trustProxyHops?: number;
   /**
    * When provided, the app is configured as an MCP OAuth 2.1 authorization
    * server: `/register`, `/authorize`, `/token`, and discovery endpoints are
@@ -721,9 +751,11 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   // `trust proxy: true` would pick a client-spoofed leftmost entry as req.ip
   // and rate-limit keying becomes attacker-controlled
   // (see express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY).
-  // Stripping exactly 2 trusted hops leaves the LB-attested client IP.
-  // If this service is ever deployed without GCLB (direct *.run.app), drop to 1.
-  app.set('trust proxy', 2);
+  // Stripping exactly N trusted hops leaves the LB-attested client IP.
+  // Configurable so deployments with a different proxy topology (e.g. direct
+  // *.run.app, additional CDN) can set the right value without forking.
+  const trustProxyHops = resolveTrustProxyHops(options);
+  app.set('trust proxy', trustProxyHops);
   const sessions = new Map<string, HttpSession>();
   const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 

@@ -627,15 +627,50 @@ describe('HTTP transport — trust proxy', () => {
     // Production XFF after GCLB looks like: "<client>, <lb-ip>".
     // We simulate that here, with an additional client-supplied spoofed
     // prefix that GCLB would just append to. trust proxy: 2 must NOT pick the
-    // leftmost (spoofed) value.
+    // leftmost (spoofed) value. All IPs are RFC 5737 documentation ranges so
+    // proxy-addr parses them as valid IPs and the test does not depend on
+    // version-specific non-IP token handling.
     const res = await fetch(`${baseUrl}/__probe_ip`, {
       headers: {
-        'X-Forwarded-For': 'spoofed-by-client, 198.51.100.7, 169.254.0.1',
+        'X-Forwarded-For': '203.0.113.99, 198.51.100.7, 192.0.2.1',
       },
     });
     const body = await res.json() as { ip: string; ips: string[] };
+    // The leftmost (spoofed 203.0.113.99) must NOT be picked.
     assert.equal(body.ip, '198.51.100.7',
       `req.ip should be the LB-attested client (198.51.100.7), got ${body.ip}`);
+  });
+
+  it('honors explicit trustProxyHops option (overrides default)', async () => {
+    const mod = await setupMocks();
+    const result = mod.createHttpApp('127.0.0.1', { trustProxyHops: 5 });
+    assert.equal(result.app.get('trust proxy'), 5);
+  });
+
+  it('honors MCP_TRUST_PROXY_HOPS env var when option is not set', async () => {
+    const prev = process.env.MCP_TRUST_PROXY_HOPS;
+    process.env.MCP_TRUST_PROXY_HOPS = '3';
+    try {
+      const mod = await setupMocks();
+      const result = mod.createHttpApp('127.0.0.1');
+      assert.equal(result.app.get('trust proxy'), 3);
+    } finally {
+      if (prev === undefined) delete process.env.MCP_TRUST_PROXY_HOPS;
+      else process.env.MCP_TRUST_PROXY_HOPS = prev;
+    }
+  });
+
+  it('falls back to default (2) when env var is invalid', async () => {
+    const prev = process.env.MCP_TRUST_PROXY_HOPS;
+    process.env.MCP_TRUST_PROXY_HOPS = 'not-a-number';
+    try {
+      const mod = await setupMocks();
+      const result = mod.createHttpApp('127.0.0.1');
+      assert.equal(result.app.get('trust proxy'), 2);
+    } finally {
+      if (prev === undefined) delete process.env.MCP_TRUST_PROXY_HOPS;
+      else process.env.MCP_TRUST_PROXY_HOPS = prev;
+    }
   });
 });
 
