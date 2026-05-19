@@ -25,6 +25,16 @@ export const AUTH_CODE_MAX_AGE_MS = 60_000;
  */
 const GRACE_WINDOW_MS = 5_000;
 
+/**
+ * Emit a structured diagnostic event to stderr (Cloud Run picks these up
+ * automatically). Query in Cloud Run logs via `textPayload=~"oauth.refresh"`.
+ * Never include raw refresh-token values — only userId / chainId — so a
+ * compromised log sink can't be used to mint sessions.
+ */
+function logEvent(event: string, data: Record<string, unknown>) {
+  console.error(`[${new Date().toISOString()}] ${event}: ${JSON.stringify(data)}`);
+}
+
 export class DriveOAuthProvider implements OAuthServerProvider {
   // Must be a getter per SDK interface
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -176,6 +186,7 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     _resource?: URL,
   ): Promise<OAuthTokens> {
     if (!this.refreshTokenStore) {
+      logEvent('oauth.refresh.no_store', {});
       throw new Error('Refresh tokens not supported');
     }
 
@@ -183,18 +194,35 @@ export class DriveOAuthProvider implements OAuthServerProvider {
     // pair we minted on the first call, avoiding spurious reuse-detection.
     const cached = this.graceCache.get(refreshToken);
     if (cached && cached.expiresAt > Date.now()) {
+      logEvent('oauth.refresh.grace_hit', {});
       return cached.tokens;
     }
     if (cached) this.graceCache.delete(refreshToken);
 
     const record = await this.refreshTokenStore.validate(refreshToken);
-    if (!record) throw new InvalidGrantError('Refresh token not found');
-    if (record.status === 'revoked') throw new InvalidGrantError('Refresh token revoked');
+    if (!record) {
+      logEvent('oauth.refresh.not_found', {});
+      throw new InvalidGrantError('Refresh token not found');
+    }
+    if (record.status === 'revoked') {
+      logEvent('oauth.refresh.revoked', { userId: record.user_id, chainId: record.chain_id });
+      throw new InvalidGrantError('Refresh token revoked');
+    }
     if (record.expires_at.getTime() < Date.now()) {
+      logEvent('oauth.refresh.expired', { userId: record.user_id, chainId: record.chain_id });
       throw new InvalidGrantError('Refresh token expired');
     }
     if (record.status === 'rotated') {
+      // CRITICAL diagnostic: this fires when the same refresh token was
+      // already consumed. Under maxScale=1 this should be impossible except
+      // for actual replay attacks. If we see this firing for legitimate
+      // users, it's a sign the in-process graceCache lost a retry — the
+      // exact failure mode that motivates the Firestore-cache follow-up.
       await this.refreshTokenStore.revokeChain(record.chain_id);
+      logEvent('oauth.refresh.reuse_detected', {
+        userId: record.user_id,
+        chainId: record.chain_id,
+      });
       throw new InvalidGrantError('Refresh token reuse detected');
     }
 
@@ -220,18 +248,27 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       tokens,
       expiresAt: Date.now() + GRACE_WINDOW_MS,
     });
+    logEvent('oauth.refresh.rotated', { userId: record.user_id, chainId: record.chain_id });
     return tokens;
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const payload = await this.jwt.verify(token);
-    return {
-      token,
-      clientId: 'drive-mcp',  // static — JWT doesn't carry clientId; value is informational
-      scopes: payload.scope?.split(' ') || [],
-      expiresAt: payload.exp,  // MUST include for requireBearerAuth expiry checking
-      extra: { userId: payload.sub, email: payload.email },
-    };
+    try {
+      const payload = await this.jwt.verify(token);
+      return {
+        token,
+        clientId: 'drive-mcp',  // static — JWT doesn't carry clientId; value is informational
+        scopes: payload.scope?.split(' ') || [],
+        expiresAt: payload.exp,  // MUST include for requireBearerAuth expiry checking
+        extra: { userId: payload.sub, email: payload.email },
+      };
+    } catch (err) {
+      // Normal at JWT expiry (every hour per user) — but a flood here would
+      // indicate signing-key issues. The SDK turns this into a 401 + WWW-Authenticate
+      // which triggers the client's refresh flow.
+      logEvent('oauth.verify.failed', { reason: (err as Error).message });
+      throw err;
+    }
   }
 
   /**

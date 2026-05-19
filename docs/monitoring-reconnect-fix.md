@@ -68,6 +68,34 @@ If the 404 fix is working, you should see a `mcp.session.created` shortly after 
 
 Look at any `mcp.session.created` or `mcp.session.not_found` log and verify the `ip` field looks like a real client IP, NOT a `169.254.x.x` or `10.x.x.x` Google internal. If it's internal, the hop count (currently 2) is wrong for our actual deploy chain — adjust and redeploy.
 
+## 6. OAuth refresh-token outcomes
+
+This separates "MCP session reset" (cheap, transparent) from "full OAuth re-auth required" (expensive, user-visible). Currently we cannot tell them apart from logs alone.
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="drive-mcp"
+textPayload=~"oauth.refresh"
+```
+
+Events:
+- `oauth.refresh.rotated` — happy path, token successfully exchanged.
+- `oauth.refresh.grace_hit` — client retried within 5s and we returned the cached pair (good).
+- `oauth.refresh.not_found` / `revoked` / `expired` — user will be forced to re-auth (bad UX, but recoverable).
+- `oauth.refresh.reuse_detected` — **CRITICAL** — fires when an already-rotated token is presented again. Under `maxScale=1` this should only happen for actual replay attacks. If it fires for legitimate users, the in-process grace cache lost a retry (the exact failure mode that motivates the Firestore-cache follow-up). Each emission revokes the user's entire refresh chain and forces re-auth.
+
+A burst of `oauth.refresh.reuse_detected` correlated with a user's reported reconnect is the smoking gun for the Phase-2 grace-cache bug.
+
+## 7. JWT verification failures
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="drive-mcp"
+textPayload=~"oauth.verify.failed"
+```
+
+Normal at JWT expiry (every hour per user). A flood would indicate signing-key issues.
+
 ## What "the fix is working" looks like
 
 Within ~hours of deploy:
