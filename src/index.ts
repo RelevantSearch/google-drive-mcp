@@ -780,6 +780,10 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.post('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
+      const bodyMethod = (req.body && typeof req.body === 'object')
+        ? (req.body as { method?: string }).method
+        : undefined;
 
       // If we have an existing session, delegate to it
       if (sessionId && sessions.has(sessionId)) {
@@ -795,6 +799,15 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
       // here is what previously made claude.ai surface "connector unavailable"
       // and require a manual reconnect.
       if (sessionId) {
+        // Diagnostic: was this triggered by the stale-session path our fix targets?
+        // Query: textPayload=~"mcp.session.not_found method=POST" in Cloud Run logs.
+        log('mcp.session.not_found', {
+          method: 'POST',
+          sidPrefix: sessionId.slice(0, 8),
+          bodyMethod,
+          ua,
+          ip: req.ip,
+        });
         res.status(404).json({
           jsonrpc: '2.0',
           error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
@@ -805,6 +818,12 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
 
       // No session ID at all — must be an initialize request
       if (!isInitializeRequest(req.body)) {
+        log('mcp.protocol.no_session', {
+          method: 'POST',
+          bodyMethod,
+          ua,
+          ip: req.ip,
+        });
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32600, message: 'Bad Request: expected initialize request or valid session ID' },
@@ -837,7 +856,9 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
       if (sid) {
         sessions.set(sid, { transport, server: sessionServer });
         resetSessionTimer(sid);
-        log(`New session created: ${sid}`);
+        // Include ip + ua so we can correlate session creation events with
+        // specific users / locations when diagnosing reconnect frequency.
+        log('mcp.session.created', { sidPrefix: sid.slice(0, 8), ua, ip: req.ip });
       }
     } catch (error) {
       log('Error handling POST /mcp', { error: (error as Error).message });
@@ -854,8 +875,10 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.get('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
       if (!sessionId) {
         // No session header is a protocol error — GET requires a session.
+        log('mcp.protocol.no_session', { method: 'GET', ua, ip: req.ip });
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32600, message: 'Bad Request: missing session ID' },
@@ -865,6 +888,12 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
       }
       if (!sessions.has(sessionId)) {
         // Known-but-expired session: 404 tells the client to re-initialize.
+        log('mcp.session.not_found', {
+          method: 'GET',
+          sidPrefix: sessionId.slice(0, 8),
+          ua,
+          ip: req.ip,
+        });
         res.status(404).json({
           jsonrpc: '2.0',
           error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
@@ -890,7 +919,9 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.delete('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
       if (!sessionId) {
+        log('mcp.protocol.no_session', { method: 'DELETE', ua, ip: req.ip });
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32600, message: 'Bad Request: missing session ID' },
@@ -902,6 +933,11 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
         // Already gone. DELETE is semantically idempotent; returning 200
         // here so clients reconciling state on shutdown or after a server-side
         // timeout don't see spurious failures.
+        log('mcp.session.delete_idempotent', {
+          sidPrefix: sessionId.slice(0, 8),
+          ua,
+          ip: req.ip,
+        });
         res.status(200).end();
         return;
       }
