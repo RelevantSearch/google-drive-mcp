@@ -197,11 +197,14 @@ describe('HTTP transport', () => {
   });
 
   it('returns 400 for GET without session ID', async () => {
+    // No session ID at all is a client protocol error, distinct from
+    // "session ID supplied but unknown" which is 404 (spec: client must
+    // start a new session).
     const res = await fetch(`${baseUrl}/mcp`);
     assert.equal(res.status, 400);
   });
 
-  it('DELETE closes session', async () => {
+  it('DELETE closes session and subsequent requests return 404', async () => {
     // Initialize a session
     const initRes = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
@@ -224,7 +227,8 @@ describe('HTTP transport', () => {
     });
     assert.equal(delRes.status, 200);
 
-    // Subsequent request with same session should fail
+    // Subsequent request with terminated session ID must return 404 so the
+    // MCP client knows to re-initialize (streamable-HTTP spec).
     const postRes = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { ...MCP_HEADERS, 'mcp-session-id': sessionId },
@@ -235,8 +239,7 @@ describe('HTTP transport', () => {
         id: 2,
       }),
     });
-    // Session is gone, and it's not an initialize request, so 400
-    assert.equal(postRes.status, 400);
+    assert.equal(postRes.status, 404);
   });
 });
 
@@ -297,13 +300,13 @@ describe('HTTP transport — session isolation', () => {
     });
     assert.equal(bRes.status, 200);
 
-    // A is gone
+    // A is gone (terminated session ID returns 404)
     const aRes = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: { ...MCP_HEADERS, 'mcp-session-id': sidA },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 4 }),
     });
-    assert.equal(aRes.status, 400);
+    assert.equal(aRes.status, 404);
   });
 });
 
@@ -328,7 +331,7 @@ describe('HTTP transport — session idle timeout', () => {
     await cleanupServer(httpServer, sessions);
   });
 
-  it('idle session is evicted after timeout', async () => {
+  it('idle session is evicted after timeout and request returns 404', async () => {
     const sid = await initializeSession(baseUrl);
     assert.ok(sessions.has(sid));
 
@@ -339,7 +342,8 @@ describe('HTTP transport — session idle timeout', () => {
       headers: { ...MCP_HEADERS, 'mcp-session-id': sid },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 2 }),
     });
-    assert.equal(res.status, 400);
+    // 404 tells the MCP client to start a new session (streamable-HTTP spec)
+    assert.equal(res.status, 404);
     assert.equal(sessions.has(sid), false);
   });
 
@@ -456,20 +460,52 @@ describe('HTTP transport — error handling', () => {
     assert.ok(body.error);
   });
 
-  it('DELETE with non-existent session ID returns 400', async () => {
+  it('DELETE with non-existent session ID is idempotent (200)', async () => {
+    // DELETE is idempotent; returning 200 lets clients reconciling state on
+    // shutdown or after a server-side idle timeout proceed without errors.
     const res = await fetch(`${baseUrl}/mcp`, {
       method: 'DELETE',
       headers: { 'mcp-session-id': 'non-existent-uuid' },
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 200);
   });
 
-  it('GET with non-existent session ID returns 400', async () => {
+  it('GET with non-existent session ID returns 404', async () => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: 'GET',
       headers: { 'mcp-session-id': 'non-existent-uuid' },
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 404);
+  });
+
+  it('POST with non-existent session ID returns 404 (not 400)', async () => {
+    // The reconnect bug: claude.ai retries with a stale session ID after the
+    // idle timer expires server-side. 400 leaves the client confused; 404 tells
+    // it to re-initialize transparently.
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { ...MCP_HEADERS, 'mcp-session-id': 'non-existent-uuid' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', params: {}, id: 1 }),
+    });
+    assert.equal(res.status, 404);
+  });
+
+  it('POST initialize with a stale Mcp-Session-Id is still rejected (404)', async () => {
+    // A client may retry an initialize while still carrying its stale session
+    // header. We require the client to drop the header on init (or omit it);
+    // returning 404 makes the client re-initialize cleanly without us
+    // implicitly recycling a client-supplied sid.
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { ...MCP_HEADERS, 'mcp-session-id': 'previously-deleted-uuid' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test-client', version: '1.0.0' } },
+        id: 1,
+      }),
+    });
+    assert.equal(res.status, 404);
   });
 });
 
@@ -539,6 +575,102 @@ describe('HTTP transport — DNS rebinding protection', () => {
       }),
     });
     assert.equal(res.status, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B6. Trust proxy. Required for Cloud Run + GCLB so X-Forwarded-For is
+// honored. Without it, express-rate-limit emits ValidationError and keys all
+// requests by the LB IP (one shared rate-limit bucket for every user).
+// Value must be a hop count (2 here), not `true`, because GCLB appends to
+// inbound XFF so a client-spoofed leftmost entry would otherwise be req.ip.
+// ---------------------------------------------------------------------------
+describe('HTTP transport — trust proxy', () => {
+  let httpServer: HttpServer;
+  let baseUrl: string;
+  let sessions: Map<string, any>;
+  let app: any;
+
+  before(async () => {
+    const mod = await setupMocks();
+    const result = mod.createHttpApp('127.0.0.1');
+    sessions = result.sessions;
+    app = result.app;
+    // Mount a probe route AFTER createHttpApp so it inherits the trust-proxy
+    // setting. This lets us verify behavior (req.ip resolution), not just the
+    // setter value.
+    app.get('/__probe_ip', (req: any, res: any) => {
+      res.json({ ip: req.ip, ips: req.ips });
+    });
+    const started = await startServer(result.app);
+    httpServer = started.httpServer;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await cleanupServer(httpServer, sessions);
+  });
+
+  it('trust proxy is set to exactly 2 hops (GCLB + Cloud Run frontend)', async () => {
+    // Stripping fewer hops than the actual chain leaks the LB IP as req.ip
+    // (one shared rate-limit bucket). Trusting more, or `true`, lets a
+    // client spoof its IP via X-Forwarded-For. Lock the value at 2.
+    assert.equal(app.get('trust proxy'), 2);
+  });
+
+  it('req.ip resolves to the GCLB-attested client and ignores a spoofed leftmost XFF entry', async () => {
+    // Express's `trust proxy: n` counts the socket peer as the first trusted
+    // hop and then trusts n-1 more from the rightmost XFF entries. With n=2,
+    // socket + the rightmost XFF entry (the LB hop) are trusted; the next
+    // leftward XFF entry is req.ip.
+    //
+    // Production XFF after GCLB looks like: "<client>, <lb-ip>".
+    // We simulate that here, with an additional client-supplied spoofed
+    // prefix that GCLB would just append to. trust proxy: 2 must NOT pick the
+    // leftmost (spoofed) value. All IPs are RFC 5737 documentation ranges so
+    // proxy-addr parses them as valid IPs and the test does not depend on
+    // version-specific non-IP token handling.
+    const res = await fetch(`${baseUrl}/__probe_ip`, {
+      headers: {
+        'X-Forwarded-For': '203.0.113.99, 198.51.100.7, 192.0.2.1',
+      },
+    });
+    const body = await res.json() as { ip: string; ips: string[] };
+    // The leftmost (spoofed 203.0.113.99) must NOT be picked.
+    assert.equal(body.ip, '198.51.100.7',
+      `req.ip should be the LB-attested client (198.51.100.7), got ${body.ip}`);
+  });
+
+  it('honors explicit trustProxyHops option (overrides default)', async () => {
+    const mod = await setupMocks();
+    const result = mod.createHttpApp('127.0.0.1', { trustProxyHops: 5 });
+    assert.equal(result.app.get('trust proxy'), 5);
+  });
+
+  it('honors MCP_TRUST_PROXY_HOPS env var when option is not set', async () => {
+    const prev = process.env.MCP_TRUST_PROXY_HOPS;
+    process.env.MCP_TRUST_PROXY_HOPS = '3';
+    try {
+      const mod = await setupMocks();
+      const result = mod.createHttpApp('127.0.0.1');
+      assert.equal(result.app.get('trust proxy'), 3);
+    } finally {
+      if (prev === undefined) delete process.env.MCP_TRUST_PROXY_HOPS;
+      else process.env.MCP_TRUST_PROXY_HOPS = prev;
+    }
+  });
+
+  it('falls back to default (2) when env var is invalid', async () => {
+    const prev = process.env.MCP_TRUST_PROXY_HOPS;
+    process.env.MCP_TRUST_PROXY_HOPS = 'not-a-number';
+    try {
+      const mod = await setupMocks();
+      const result = mod.createHttpApp('127.0.0.1');
+      assert.equal(result.app.get('trust proxy'), 2);
+    } finally {
+      if (prev === undefined) delete process.env.MCP_TRUST_PROXY_HOPS;
+      else process.env.MCP_TRUST_PROXY_HOPS = prev;
+    }
   });
 });
 

@@ -692,8 +692,46 @@ interface HttpSession {
  */
 const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+/**
+ * JSON-RPC server-defined error code (the -32000..-32099 range is reserved for
+ * application errors per JSON-RPC 2.0). Returned alongside HTTP 404 when a
+ * client presents an unknown or expired `Mcp-Session-Id` so the client knows
+ * to re-initialize.
+ */
+const JSONRPC_SESSION_NOT_FOUND = -32001;
+
+/** Default trust-proxy hop count for our Cloud Run + GCLB deploy topology. */
+const DEFAULT_TRUST_PROXY_HOPS = 2;
+
+/**
+ * Determine trust-proxy hops in priority order: explicit option > env var >
+ * default. Non-negative integer required. Falls back to default on parse error.
+ */
+function resolveTrustProxyHops(options?: { trustProxyHops?: number }): number {
+  if (typeof options?.trustProxyHops === 'number' && options.trustProxyHops >= 0) {
+    return Math.floor(options.trustProxyHops);
+  }
+  const envRaw = process.env.MCP_TRUST_PROXY_HOPS;
+  if (envRaw !== undefined) {
+    const parsed = parseInt(envRaw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    console.warn(
+      `[trust-proxy] MCP_TRUST_PROXY_HOPS="${envRaw}" is not a non-negative integer; falling back to default ${DEFAULT_TRUST_PROXY_HOPS}.`,
+    );
+  }
+  return DEFAULT_TRUST_PROXY_HOPS;
+}
+
 interface CreateHttpAppOptions {
   sessionIdleTimeoutMs?: number;
+  /**
+   * Number of trusted proxy hops to strip from X-Forwarded-For. Defaults
+   * to `MCP_TRUST_PROXY_HOPS` env var if set (parsed as integer), else 2
+   * which is correct for our Cloud Run + GCLB topology. Set to 1 if
+   * deployed without a load balancer (direct *.run.app). 0 disables trust
+   * proxy entirely and will re-trigger express-rate-limit ValidationError.
+   */
+  trustProxyHops?: number;
   /**
    * When provided, the app is configured as an MCP OAuth 2.1 authorization
    * server: `/register`, `/authorize`, `/token`, and discovery endpoints are
@@ -707,6 +745,17 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   const idleTimeoutMs = options?.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS;
   const authDeps = options?.authDeps;
   const app = createMcpExpressApp({ host });
+  // Cloud Run + GCLB sit in front. Two trusted proxies append to
+  // X-Forwarded-For: the global external HTTPS LB and the Cloud Run frontend.
+  // GCLB *appends* to any inbound XFF rather than stripping it, so
+  // `trust proxy: true` would pick a client-spoofed leftmost entry as req.ip
+  // and rate-limit keying becomes attacker-controlled
+  // (see express-rate-limit ERR_ERL_PERMISSIVE_TRUST_PROXY).
+  // Stripping exactly N trusted hops leaves the LB-attested client IP.
+  // Configurable so deployments with a different proxy topology (e.g. direct
+  // *.run.app, additional CDN) can set the right value without forking.
+  const trustProxyHops = resolveTrustProxyHops(options);
+  app.set('trust proxy', trustProxyHops);
   const sessions = new Map<string, HttpSession>();
   const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -763,6 +812,10 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.post('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
+      const bodyMethod = (req.body && typeof req.body === 'object')
+        ? (req.body as { method?: string }).method
+        : undefined;
 
       // If we have an existing session, delegate to it
       if (sessionId && sessions.has(sessionId)) {
@@ -772,8 +825,37 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
         return;
       }
 
-      // New session: only accept initialize requests
+      // Session ID supplied but unknown (server-side timeout, instance recycle,
+      // or moved to a different instance). Per streamable-HTTP spec the server
+      // MUST respond 404 so the client knows to re-initialize. Returning 400
+      // here is what previously made claude.ai surface "connector unavailable"
+      // and require a manual reconnect.
+      if (sessionId) {
+        // Diagnostic: was this triggered by the stale-session path our fix targets?
+        // Query: textPayload=~"mcp.session.not_found method=POST" in Cloud Run logs.
+        log('mcp.session.not_found', {
+          method: 'POST',
+          sidPrefix: sessionId.slice(0, 8),
+          bodyMethod,
+          ua,
+          ip: req.ip,
+        });
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
+          id: null,
+        });
+        return;
+      }
+
+      // No session ID at all — must be an initialize request
       if (!isInitializeRequest(req.body)) {
+        log('mcp.protocol.no_session', {
+          method: 'POST',
+          bodyMethod,
+          ua,
+          ip: req.ip,
+        });
         res.status(400).json({
           jsonrpc: '2.0',
           error: { code: -32600, message: 'Bad Request: expected initialize request or valid session ID' },
@@ -806,7 +888,9 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
       if (sid) {
         sessions.set(sid, { transport, server: sessionServer });
         resetSessionTimer(sid);
-        log(`New session created: ${sid}`);
+        // Include ip + ua so we can correlate session creation events with
+        // specific users / locations when diagnosing reconnect frequency.
+        log('mcp.session.created', { sidPrefix: sid.slice(0, 8), ua, ip: req.ip });
       }
     } catch (error) {
       log('Error handling POST /mcp', { error: (error as Error).message });
@@ -823,10 +907,28 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.get('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
+      if (!sessionId) {
+        // No session header is a protocol error — GET requires a session.
+        log('mcp.protocol.no_session', { method: 'GET', ua, ip: req.ip });
         res.status(400).json({
           jsonrpc: '2.0',
-          error: { code: -32600, message: 'Bad Request: missing or invalid session ID' },
+          error: { code: -32600, message: 'Bad Request: missing session ID' },
+          id: null,
+        });
+        return;
+      }
+      if (!sessions.has(sessionId)) {
+        // Known-but-expired session: 404 tells the client to re-initialize.
+        log('mcp.session.not_found', {
+          method: 'GET',
+          sidPrefix: sessionId.slice(0, 8),
+          ua,
+          ip: req.ip,
+        });
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: JSONRPC_SESSION_NOT_FOUND, message: 'Session not found' },
           id: null,
         });
         return;
@@ -849,12 +951,26 @@ function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   app.delete('/mcp', ...mcpHandlers, async (req, res) => {
     try {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
+      const ua = (req.headers['user-agent'] as string | undefined)?.slice(0, 80);
+      if (!sessionId) {
+        log('mcp.protocol.no_session', { method: 'DELETE', ua, ip: req.ip });
         res.status(400).json({
           jsonrpc: '2.0',
-          error: { code: -32600, message: 'Bad Request: missing or invalid session ID' },
+          error: { code: -32600, message: 'Bad Request: missing session ID' },
           id: null,
         });
+        return;
+      }
+      if (!sessions.has(sessionId)) {
+        // Already gone. DELETE is semantically idempotent; returning 200
+        // here so clients reconciling state on shutdown or after a server-side
+        // timeout don't see spurious failures.
+        log('mcp.session.delete_idempotent', {
+          sidPrefix: sessionId.slice(0, 8),
+          ua,
+          ip: req.ip,
+        });
+        res.status(200).end();
         return;
       }
       const session = sessions.get(sessionId)!;
