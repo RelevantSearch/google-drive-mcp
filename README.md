@@ -306,7 +306,8 @@ export GOOGLE_DRIVE_MCP_SCOPES="drive.readonly,documents,spreadsheets"
 Notes:
 - Comma-separated list.
 - Values can be full scope URLs or short aliases:
-  `drive`, `drive.file`, `drive.readonly`, `documents`, `spreadsheets`, `presentations`, `calendar`, `calendar.events`.
+  `drive`, `drive.file`, `drive.readonly`, `documents`, `spreadsheets`, `presentations`, `calendar`, `calendar.events`, `drive.labels.readonly`.
+- `drive.labels.readonly` is required by the Drive Labels tools (`listDriveLabels`, `getFileLabels`, `setFileLabels`) to read the label registry. It is included in the defaults, so **existing connections must re-authenticate once** to grant it.
 - Changing scopes usually requires re-authentication.
 
 ### Auth Server Port Configuration
@@ -431,6 +432,20 @@ When binding to `127.0.0.1` (default), DNS rebinding protection is automatically
 - **listSharedDrives** - List available Google Shared Drives
   - `pageSize`: Number of drives to return (optional, default 50, max 100)
   - `pageToken`: Pagination token (optional)
+
+### Drive Labels (controlled registry)
+Read the org's Drive Label taxonomy and read/modify the label values applied to a
+file. These tools never change label *definitions* (the dropdown registry) — that
+stays admin-controlled. Requires the `drive.labels.readonly` scope.
+
+- **listDriveLabels** - List the published Drive Labels: each label id + title, its fields, and (for selection fields) the allowed choices with their choice IDs. Use this to discover approved values.
+  - `pageSize`: Labels to return (optional, default 50, max 200)
+  - `pageToken`: Pagination token (optional)
+- **getFileLabels** - Read the labels currently applied to a file, with each field's value(s).
+  - `fileId`: Google Drive file ID (required)
+- **setFileLabels** - Apply/change label field values **on a file** (`files.modifyLabels`). Sets selection fields by choice ID and/or text fields; never edits label definitions.
+  - `fileId`: Google Drive file ID (required)
+  - `modifications`: array of `{ labelId, fields: [{ fieldId, selectionValues?, textValues?, unset? }] }`
 
 ### File Management
 - **createTextFile** - Create a text or markdown file
