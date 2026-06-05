@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **labels:** add Drive Labels tools — `listDriveLabels` (read the controlled label registry: labels, fields, and selection choices with their IDs), `getFileLabels` (read labels applied to a file), and `setFileLabels` (apply/change label field values on a file via `files.modifyLabels`). These read the taxonomy and read/modify labels **on files**; they never modify label definitions (the dropdown registry stays admin-controlled). Adds the `drive.labels.readonly` scope to the defaults — **existing connections must re-authenticate once** to grant it.
+
 ### Bug Fixes
 
 - **transport:** return 404 (not 400) when an `Mcp-Session-Id` references an unknown or expired session. Per the streamable-HTTP spec, this signals the client to re-initialize a session transparently. Previously, claude.ai surfaced "connector unavailable" and required a manual reconnect after the 30-min idle timeout.

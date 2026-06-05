@@ -16,7 +16,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID, randomBytes } from 'crypto';
 import { google } from "googleapis";
-import type { drive_v3, calendar_v3 } from "googleapis";
+import type { drive_v3, calendar_v3, drivelabels_v2 } from "googleapis";
 import { authenticate, AuthServer, initializeOAuth2Client } from './auth.js';
 import { OAuth2Client } from 'google-auth-library';
 import { fileURLToPath } from 'url';
@@ -54,6 +54,7 @@ interface AuthDeps {
 // Cached service instances — only recreated when authClient changes
 let _drive: drive_v3.Drive | null = null;
 let _calendar: calendar_v3.Calendar | null = null;
+let _drivelabels: drivelabels_v2.Drivelabels | null = null;
 let _lastAuthClient: any = null;
 
 function getDrive(): drive_v3.Drive {
@@ -62,6 +63,14 @@ function getDrive(): drive_v3.Drive {
   _drive = google.drive({ version: 'v3', auth: authClient });
   log('Drive service created');
   return _drive;
+}
+
+function getDriveLabels(): drivelabels_v2.Drivelabels {
+  if (!authClient) throw new Error('Authentication required');
+  if (_drivelabels && _lastAuthClient === authClient) return _drivelabels;
+  _drivelabels = google.drivelabels({ version: 'v2', auth: authClient });
+  log('Drive Labels service created');
+  return _drivelabels;
 }
 
 function getCalendar(): calendar_v3.Calendar {
@@ -218,6 +227,7 @@ function buildToolContext(): ToolContext {
     google,
     getDrive,
     getCalendar,
+    getDriveLabels,
     log,
     resolvePath,
     resolveFolderId,
@@ -276,6 +286,7 @@ async function buildUserToolContext(authInfo: AuthInfo, deps: AuthDeps): Promise
 
   let drive: drive_v3.Drive | null = null;
   let calendar: calendar_v3.Calendar | null = null;
+  let drivelabels: drivelabels_v2.Drivelabels | null = null;
   const lazyDrive = () => {
     if (!drive) drive = google.drive({ version: 'v3', auth: oauth2Client });
     return drive;
@@ -288,6 +299,10 @@ async function buildUserToolContext(authInfo: AuthInfo, deps: AuthDeps): Promise
     getCalendar: () => {
       if (!calendar) calendar = google.calendar({ version: 'v3', auth: oauth2Client });
       return calendar;
+    },
+    getDriveLabels: () => {
+      if (!drivelabels) drivelabels = google.drivelabels({ version: 'v2', auth: oauth2Client });
+      return drivelabels;
     },
     log,
     resolvePath: (pathStr) => resolvePathOn(lazyDrive(), pathStr),

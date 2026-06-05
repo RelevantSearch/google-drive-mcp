@@ -11,6 +11,13 @@ export const SCOPE_ALIASES: Record<string, string> = {
   presentations: 'https://www.googleapis.com/auth/presentations',
   calendar: 'https://www.googleapis.com/auth/calendar',
   'calendar.events': 'https://www.googleapis.com/auth/calendar.events',
+  // Read-only access to Drive Label definitions (the controlled registry of
+  // available label fields and their allowed values), and to interpret labels
+  // applied to files. Writing label VALUES onto a file uses the `drive` scope
+  // via files.modifyLabels — this scope is read-only of the taxonomy. We do NOT
+  // request `drive.labels` (read/write of label DEFINITIONS): the dropdown
+  // registry stays admin-controlled.
+  'drive.labels.readonly': 'https://www.googleapis.com/auth/drive.labels.readonly',
 };
 
 export const SCOPE_PRESETS: Record<string, string[]> = {
@@ -23,6 +30,7 @@ export const DEFAULT_SCOPES: readonly string[] = [
   'drive', 'drive.file', 'drive.readonly',
   'documents', 'spreadsheets', 'presentations',
   'calendar', 'calendar.events',
+  'drive.labels.readonly',
 ].map((s) => SCOPE_ALIASES[s]);
 
 /**

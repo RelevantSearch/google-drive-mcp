@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { drive_v3 } from 'googleapis';
+import type { drive_v3, drivelabels_v2 } from 'googleapis';
 import { existsSync, statSync, createReadStream } from 'fs';
 import { mkdtemp, readFile, writeFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -72,6 +72,34 @@ const ListFolderSchema = z.object({
 const ListSharedDrivesSchema = z.object({
   pageSize: z.number().int().min(1).max(100).optional(),
   pageToken: z.string().optional()
+});
+
+// --- Drive Labels (controlled registry) ---------------------------------
+const ListDriveLabelsSchema = z.object({
+  pageSize: z.number().int().min(1).max(200).optional(),
+  pageToken: z.string().optional()
+});
+
+const GetFileLabelsSchema = z.object({
+  fileId: z.string().min(1, "File ID is required")
+});
+
+const SetFileLabelsFieldSchema = z.object({
+  fieldId: z.string().min(1, "fieldId is required"),
+  selectionValues: z.array(z.string()).optional(),
+  textValues: z.array(z.string()).optional(),
+  unset: z.boolean().optional()
+}).refine(
+  (f) => f.unset === true || (f.selectionValues?.length ?? 0) > 0 || (f.textValues?.length ?? 0) > 0,
+  { message: "Each field needs selectionValues, textValues, or unset: true" }
+);
+
+const SetFileLabelsSchema = z.object({
+  fileId: z.string().min(1, "File ID is required"),
+  modifications: z.array(z.object({
+    labelId: z.string().min(1, "labelId is required"),
+    fields: z.array(SetFileLabelsFieldSchema).min(1, "At least one field modification is required")
+  })).min(1, "At least one label modification is required")
 });
 
 const DeleteItemSchema = z.object({
@@ -316,6 +344,64 @@ export const toolDefinitions: ToolDefinition[] = [
         pageSize: { type: "number", description: "Drives to return (default 50, max 100)" },
         pageToken: { type: "string", description: "Token for next page" }
       }
+    }
+  },
+  {
+    name: "listDriveLabels",
+    description: "List the published Drive Labels (the controlled registry): each label's id and title, its fields, and for selection fields the allowed choices (id + display name). Use this to discover the approved values to apply to a file. Read-only of the label taxonomy — does not change any label definitions or any file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageSize: { type: "number", description: "Labels to return (default 50, max 200)" },
+        pageToken: { type: "string", description: "Token for next page" }
+      }
+    }
+  },
+  {
+    name: "getFileLabels",
+    description: "Read the labels currently applied to a file, with each field's current value(s). Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: { type: "string", description: "Google Drive file ID" }
+      },
+      required: ["fileId"]
+    }
+  },
+  {
+    name: "setFileLabels",
+    description: "Apply or change label field VALUES on a file (Drive files.modifyLabels). Sets selection fields (by choice ID) and/or text fields. This modifies the labels on the file only — it never changes the label definitions or the dropdown registry. Use listDriveLabels to get label/field/choice IDs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: { type: "string", description: "Google Drive file ID" },
+        modifications: {
+          type: "array",
+          description: "Label modifications to apply",
+          items: {
+            type: "object",
+            properties: {
+              labelId: { type: "string", description: "The label ID (e.g. from listDriveLabels)" },
+              fields: {
+                type: "array",
+                description: "Field modifications within this label",
+                items: {
+                  type: "object",
+                  properties: {
+                    fieldId: { type: "string", description: "The field ID within the label" },
+                    selectionValues: { type: "array", items: { type: "string" }, description: "Choice IDs to set for a selection field" },
+                    textValues: { type: "array", items: { type: "string" }, description: "Text values to set for a text field" },
+                    unset: { type: "boolean", description: "If true, clear this field's value" }
+                  },
+                  required: ["fieldId"]
+                }
+              }
+            },
+            required: ["labelId", "fields"]
+          }
+        }
+      },
+      required: ["fileId", "modifications"]
     }
   },
   {
@@ -1791,6 +1877,119 @@ export async function handleTool(
           isError: true,
         };
       }
+    }
+
+    case "listDriveLabels": {
+      const validation = ListDriveLabelsSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const data = validation.data;
+
+      const res = await ctx.getDriveLabels().labels.list({
+        view: 'LABEL_VIEW_FULL',
+        publishedOnly: true,
+        pageSize: Math.min(data.pageSize || 50, 200),
+        pageToken: data.pageToken,
+      });
+
+      const labels = res.data.labels || [];
+      if (labels.length === 0) {
+        return { content: [{ type: 'text', text: 'No published Drive Labels found.' }], isError: false };
+      }
+
+      const formatted = labels.map((label: drivelabels_v2.Schema$GoogleAppsDriveLabelsV2Label) => {
+        const labelId = label.id || (label.name ? label.name.replace(/^labels\//, '') : '');
+        const title = label.properties?.title || '(untitled label)';
+        const fields = (label.fields || []).map((f: drivelabels_v2.Schema$GoogleAppsDriveLabelsV2Field) => {
+          const fieldId = f.id || '';
+          const displayName = f.properties?.displayName || '(unnamed field)';
+          let type = 'text';
+          let choices = '';
+          if (f.selectionOptions) {
+            type = 'selection';
+            const cs = f.selectionOptions.choices || [];
+            choices = cs
+              .map((c: { id?: string | null; properties?: { displayName?: string | null } | null }) =>
+                `        - ${c.properties?.displayName || '(unnamed)'} (choiceId: ${c.id})`)
+              .join('\n');
+          } else if (f.integerOptions) type = 'integer';
+          else if (f.dateOptions) type = 'date';
+          else if (f.userOptions) type = 'user';
+          let line = `      • ${displayName} (fieldId: ${fieldId}, type: ${type})`;
+          if (choices) line += `\n${choices}`;
+          return line;
+        }).join('\n');
+        return `▸ ${title} (labelId: ${labelId})\n${fields}`;
+      }).join('\n\n');
+
+      let response = `Drive Labels (controlled registry):\n\n${formatted}`;
+      if (res.data.nextPageToken) {
+        response += `\n\nMore results available. Use pageToken: ${res.data.nextPageToken}`;
+      }
+      return { content: [{ type: 'text', text: response }], isError: false };
+    }
+
+    case "getFileLabels": {
+      const validation = GetFileLabelsSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const { fileId } = validation.data;
+
+      const res = await ctx.getDrive().files.listLabels({ fileId });
+      const labels = res.data.labels || [];
+      if (labels.length === 0) {
+        return { content: [{ type: 'text', text: `No labels are applied to file ${fileId}.` }], isError: false };
+      }
+
+      const formatted = labels.map((l: drive_v3.Schema$Label) => {
+        const fields = Object.entries(l.fields || {}).map(([fieldId, f]) => {
+          const field = f as drive_v3.Schema$LabelField;
+          const raw =
+            field.selection || field.text || field.integer || field.dateString ||
+            (field.user || []).map((u) => u.emailAddress || u.displayName || '') || [];
+          const value = Array.isArray(raw) ? raw.join(', ') : String(raw);
+          return `      • ${fieldId}: ${value} (valueType: ${field.valueType})`;
+        }).join('\n');
+        return `▸ labelId: ${l.id} (revision ${l.revisionId})\n${fields}`;
+      }).join('\n\n');
+
+      return { content: [{ type: 'text', text: `Labels on file ${fileId}:\n\n${formatted}` }], isError: false };
+    }
+
+    case "setFileLabels": {
+      const validation = SetFileLabelsSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const { fileId, modifications } = validation.data;
+
+      const labelModifications = modifications.map((m) => ({
+        labelId: m.labelId,
+        fieldModifications: m.fields.map((f) => {
+          const mod: drive_v3.Schema$LabelFieldModification = { fieldId: f.fieldId };
+          if (f.unset) {
+            mod.unsetValues = true;
+          } else if (f.selectionValues && f.selectionValues.length > 0) {
+            mod.setSelectionValues = f.selectionValues;
+          } else if (f.textValues && f.textValues.length > 0) {
+            mod.setTextValues = f.textValues;
+          }
+          return mod;
+        }),
+      }));
+
+      const res = await ctx.getDrive().files.modifyLabels({
+        fileId,
+        requestBody: { labelModifications },
+      });
+
+      const modified = res.data.modifiedLabels || [];
+      return {
+        content: [{ type: 'text', text: `Applied label changes to file ${fileId}. ${modified.length} label(s) now set on the file.` }],
+        isError: false,
+      };
     }
 
     default:

@@ -1,4 +1,4 @@
-import type { drive_v3, calendar_v3 } from 'googleapis';
+import type { drive_v3, calendar_v3, drivelabels_v2 } from 'googleapis';
 import type { google as GoogleApisType } from 'googleapis';
 
 export interface ToolResult {
@@ -24,6 +24,8 @@ export interface ToolContext {
   google: typeof GoogleApisType;
   getDrive: () => drive_v3.Drive;
   getCalendar: () => calendar_v3.Calendar;
+  /** Drive Labels API (v2) client — reads the controlled label registry. */
+  getDriveLabels: () => drivelabels_v2.Drivelabels;
   log: (message: string, data?: any) => void;
   resolvePath: (pathStr: string) => Promise<string>;
   resolveFolderId: (input: string | undefined) => Promise<string>;

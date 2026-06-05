@@ -27,6 +27,7 @@ export async function setupTestServer(): Promise<TestContext> {
 
   // Patch the googleapis singleton
   (google as any).drive = mocks.google.drive;
+  (google as any).drivelabels = mocks.google.drivelabels;
   (google as any).docs = mocks.google.docs;
   (google as any).sheets = mocks.google.sheets;
   (google as any).slides = mocks.google.slides;

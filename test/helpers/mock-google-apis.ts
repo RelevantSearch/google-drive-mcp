@@ -58,6 +58,8 @@ export function createDriveMock() {
     delete: stub(tracker, 'files.delete', {}),
     copy: stub(tracker, 'files.copy', { id: 'file-copy-1', name: 'Copy of test-file', webViewLink: 'https://link' }),
     export: stub(tracker, 'files.export', {}),
+    listLabels: stub(tracker, 'files.listLabels', { labels: [] }),
+    modifyLabels: stub(tracker, 'files.modifyLabels', { modifiedLabels: [] }),
   };
   const comments = {
     list: stub(tracker, 'comments.list', { comments: [] }),
@@ -83,6 +85,17 @@ export function createDriveMock() {
     get: stub(tracker, 'revisions.get', { id: '1', modifiedTime: '2026-01-01T10:00:00Z', exportLinks: { 'application/pdf': 'https://example.com/export.pdf' } }),
   };
   return { service: { files, comments, replies, permissions, revisions, drives }, tracker };
+}
+
+// ---------------------------------------------------------------------------
+// Drive Labels mock (drivelabels v2)
+// ---------------------------------------------------------------------------
+export function createDriveLabelsMock() {
+  const tracker = new CallTracker();
+  const labels = {
+    list: stub(tracker, 'labels.list', { labels: [] }),
+  };
+  return { service: { labels }, tracker };
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +248,7 @@ export function createCalendarMock() {
 // ---------------------------------------------------------------------------
 export interface AllMocks {
   drive: ReturnType<typeof createDriveMock>;
+  driveLabels: ReturnType<typeof createDriveLabelsMock>;
   docs: ReturnType<typeof createDocsMock>;
   sheets: ReturnType<typeof createSheetsMock>;
   slides: ReturnType<typeof createSlidesMock>;
@@ -244,6 +258,7 @@ export interface AllMocks {
 
 export function createAllMocks(): AllMocks {
   const drive = createDriveMock();
+  const driveLabels = createDriveLabelsMock();
   const docs = createDocsMock();
   const sheets = createSheetsMock();
   const slides = createSlidesMock();
@@ -251,11 +266,12 @@ export function createAllMocks(): AllMocks {
 
   const google: Record<string, (...args: any[]) => any> = {
     drive: () => drive.service,
+    drivelabels: () => driveLabels.service,
     docs: () => docs.service,
     sheets: () => sheets.service,
     slides: () => slides.service,
     calendar: () => calendar.service,
   };
 
-  return { drive, docs, sheets, slides, calendar, google };
+  return { drive, driveLabels, docs, sheets, slides, calendar, google };
 }
