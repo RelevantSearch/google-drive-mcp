@@ -703,6 +703,55 @@ export const toolDefinitions: ToolDefinition[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Drive Labels helpers
+// ---------------------------------------------------------------------------
+
+/** Bare, revision-stripped label id from a Drive Labels resource. */
+function bareLabelId(label: drivelabels_v2.Schema$GoogleAppsDriveLabelsV2Label): string {
+  if (label.id) return label.id;
+  if (!label.name) return '';
+  return label.name.replace(/^labels\//, '').replace(/@.*$/, '');
+}
+
+interface LabelNameMeta {
+  title: string;
+  fields: Map<string, { name: string; choices: Map<string, string> }>;
+}
+
+/**
+ * Fetch the published label taxonomy and build an id → display-name map so the
+ * opaque label/field/choice ids on a file can be rendered human-readably.
+ * Best-effort: callers should tolerate a thrown error and fall back to ids.
+ */
+async function buildLabelNameMap(ctx: ToolContext): Promise<Map<string, LabelNameMeta>> {
+  const map = new Map<string, LabelNameMeta>();
+  let pageToken: string | undefined;
+  do {
+    const r = await ctx.getDriveLabels().labels.list({
+      view: 'LABEL_VIEW_FULL',
+      publishedOnly: true,
+      pageSize: 200,
+      pageToken,
+    });
+    for (const label of r.data.labels || []) {
+      const fields = new Map<string, { name: string; choices: Map<string, string> }>();
+      for (const f of label.fields || []) {
+        if (!f.id) continue;
+        const choices = new Map<string, string>();
+        for (const c of f.selectionOptions?.choices || []) {
+          if (c.id) choices.set(c.id, c.properties?.displayName || c.id);
+        }
+        fields.set(f.id, { name: f.properties?.displayName || f.id, choices });
+      }
+      const id = bareLabelId(label);
+      if (id) map.set(id, { title: label.properties?.title || id, fields });
+    }
+    pageToken = r.data.nextPageToken || undefined;
+  } while (pageToken);
+  return map;
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -1899,7 +1948,7 @@ export async function handleTool(
       }
 
       const formatted = labels.map((label: drivelabels_v2.Schema$GoogleAppsDriveLabelsV2Label) => {
-        const labelId = label.id || (label.name ? label.name.replace(/^labels\//, '') : '');
+        const labelId = bareLabelId(label);
         const title = label.properties?.title || '(untitled label)';
         const fields = (label.fields || []).map((f: drivelabels_v2.Schema$GoogleAppsDriveLabelsV2Field) => {
           const fieldId = f.id || '';
@@ -1937,22 +1986,54 @@ export async function handleTool(
       }
       const { fileId } = validation.data;
 
-      const res = await ctx.getDrive().files.listLabels({ fileId });
-      const labels = res.data.labels || [];
+      // Collect every applied label (paginate so a file with many labels is not truncated).
+      const labels: drive_v3.Schema$Label[] = [];
+      let filePageToken: string | undefined;
+      do {
+        const res = await ctx.getDrive().files.listLabels({ fileId, maxResults: 100, pageToken: filePageToken });
+        labels.push(...(res.data.labels || []));
+        filePageToken = res.data.nextPageToken || undefined;
+      } while (filePageToken);
+
       if (labels.length === 0) {
         return { content: [{ type: 'text', text: `No labels are applied to file ${fileId}.` }], isError: false };
       }
 
+      // Resolve ids → display names from the taxonomy (best-effort: fall back to ids).
+      let nameMap = new Map<string, LabelNameMeta>();
+      try {
+        nameMap = await buildLabelNameMap(ctx);
+      } catch {
+        nameMap = new Map();
+      }
+
       const formatted = labels.map((l: drive_v3.Schema$Label) => {
+        const meta = nameMap.get(l.id || '');
+        const header = meta ? `▸ ${meta.title} (labelId: ${l.id})` : `▸ labelId: ${l.id}`;
         const fields = Object.entries(l.fields || {}).map(([fieldId, f]) => {
           const field = f as drive_v3.Schema$LabelField;
-          const raw =
-            field.selection || field.text || field.integer || field.dateString ||
-            (field.user || []).map((u) => u.emailAddress || u.displayName || '') || [];
-          const value = Array.isArray(raw) ? raw.join(', ') : String(raw);
-          return `      • ${fieldId}: ${value} (valueType: ${field.valueType})`;
+          const fieldMeta = meta?.fields.get(fieldId);
+          const fieldName = fieldMeta?.name || fieldId;
+          let value: string;
+          if (field.selection && field.selection.length) {
+            value = field.selection
+              .map((cid) => { const n = fieldMeta?.choices.get(cid); return n ? `${n} (${cid})` : cid; })
+              .join(', ');
+          } else if (field.text && field.text.length) {
+            value = field.text.join(', ');
+          } else if (field.integer && field.integer.length) {
+            value = field.integer.join(', ');
+          } else if (field.dateString && field.dateString.length) {
+            value = field.dateString.join(', ');
+          } else if (field.user && field.user.length) {
+            value = field.user.map((u) => u.emailAddress || u.displayName || '(user)').join(', ');
+          } else {
+            value = '(no value)';
+          }
+          const idHint = fieldMeta ? ` [fieldId: ${fieldId}]` : '';
+          return `      • ${fieldName}: ${value}${idHint}`;
         }).join('\n');
-        return `▸ labelId: ${l.id} (revision ${l.revisionId})\n${fields}`;
+        return `${header}\n${fields}`;
       }).join('\n\n');
 
       return { content: [{ type: 'text', text: `Labels on file ${fileId}:\n\n${formatted}` }], isError: false };

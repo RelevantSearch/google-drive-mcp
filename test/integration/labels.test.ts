@@ -105,6 +105,25 @@ describe('Drive Labels tools', () => {
       assert.ok(text.includes('boardy, research'));
     });
 
+    it('resolves field + choice display names from the taxonomy', async () => {
+      ctx.mocks.drive.service.files.listLabels._setImpl(async () => ({
+        data: { labels: [{ id: 'LABEL123', revisionId: '7', fields: { FIELDArea: { valueType: 'selection', selection: ['choiceReva'] } } }] },
+      }));
+      ctx.mocks.driveLabels.service.labels.list._setImpl(async () => ({
+        data: { labels: [{
+          id: 'LABEL123', name: 'labels/LABEL123', properties: { title: 'Context' },
+          fields: [{ id: 'FIELDArea', properties: { displayName: 'Areas' }, selectionOptions: { choices: [{ id: 'choiceReva', properties: { displayName: 'Reva' } }] } }],
+        }] },
+      }));
+      const res = await callTool(ctx.client, 'getFileLabels', { fileId: 'file-9' });
+      assert.equal(res.isError, false);
+      const text = res.content[0].text;
+      assert.ok(text.includes('Context'), 'shows label title');
+      assert.ok(text.includes('Areas: Reva'), 'shows field + choice display names');
+      ctx.mocks.drive.service.files.listLabels._resetImpl();
+      ctx.mocks.driveLabels.service.labels.list._resetImpl();
+    });
+
     it('handles a file with no labels', async () => {
       ctx.mocks.drive.service.files.listLabels._setImpl(async () => ({ data: { labels: [] } }));
       const res = await callTool(ctx.client, 'getFileLabels', { fileId: 'file-9' });
