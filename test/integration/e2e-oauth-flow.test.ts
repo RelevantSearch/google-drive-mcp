@@ -28,6 +28,7 @@ import type {
   PendingAuthorization,
   AuthCodeRecord,
 } from '../../src/auth/types.js';
+import { assertValidFirestoreDocument } from '../helpers/firestore-doc-validation.js';
 
 let _serverModule: any = null;
 async function getServerModule() {
@@ -53,14 +54,28 @@ function makeStoreStub() {
 
   return {
     async getOAuthClient(id: string) { return oauthClients.get(id); },
-    async saveOAuthClient(c: OAuthClient) { oauthClients.set(c.client_id, c); },
-    async getUserTokens(id: string) { return userTokens.get(id); },
-    async saveUserTokens(t: UserTokens) { userTokens.set(t.user_id, t); },
+    async saveOAuthClient(c: OAuthClient) {
+      assertValidFirestoreDocument(c);
+      oauthClients.set(c.client_id, c);
+    },
+    async getUserTokens(id: string) {
+      return userTokens.get(id);
+    },
+    async saveUserTokens(t: UserTokens) {
+      assertValidFirestoreDocument(t);
+      userTokens.set(t.user_id, t);
+    },
     async getPendingAuthorization(state: string) { return pending.get(state); },
-    async savePendingAuthorization(state: string, p: PendingAuthorization) { pending.set(state, p); },
+    async savePendingAuthorization(state: string, p: PendingAuthorization) {
+      assertValidFirestoreDocument(p);
+      pending.set(state, p);
+    },
     async deletePendingAuthorization(state: string) { pending.delete(state); },
     async getAuthorizationCode(code: string) { return authCodes.get(code); },
-    async saveAuthorizationCode(code: string, r: AuthCodeRecord) { authCodes.set(code, r); },
+    async saveAuthorizationCode(code: string, r: AuthCodeRecord) {
+      assertValidFirestoreDocument(r);
+      authCodes.set(code, r);
+    },
     async consumeAuthorizationCode(code: string) {
       const rec = authCodes.get(code);
       if (!rec) return undefined;
@@ -385,6 +400,121 @@ describe('E2E OAuth 2.1 flow (mocked Google)', () => {
       }).toString(),
     });
     assert.ok(replayRes.status >= 400, 'replay of consumed code must not succeed');
+  });
+
+  it('completes the full flow for a PUBLIC client (no client_secret, PKCE only)', async () => {
+    // Same journey Claude Code performs: register with
+    // token_endpoint_auth_method "none", then authorize → callback → token
+    // and refresh, authenticating at /token with client_id + PKCE only.
+    const meta = await (await fetch(`${baseUrl}/.well-known/oauth-authorization-server`)).json();
+    const regEndpoint = `${baseUrl}${new URL(meta.registration_endpoint).pathname}`;
+    const authorizeEndpoint = `${baseUrl}${new URL(meta.authorization_endpoint).pathname}`;
+    const tokenEndpoint = `${baseUrl}${new URL(meta.token_endpoint).pathname}`;
+
+    // ── Register a public client ─────────────────────────────────────
+    const regRes = await fetch(regEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'Claude Code (e2e)',
+        redirect_uris: ['http://localhost:33418/callback'],
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        token_endpoint_auth_method: 'none',
+      }),
+    });
+    const regBody = await regRes.text();
+    assert.equal(regRes.status, 201, regBody);
+    const client = JSON.parse(regBody);
+    assert.ok(client.client_id);
+    assert.equal(client.client_secret, undefined, 'public client must not receive a secret');
+
+    // ── /authorize with PKCE ─────────────────────────────────────────
+    const codeVerifier = randomBytes(32).toString('base64url');
+    const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
+    const claudeState = randomBytes(8).toString('hex');
+
+    const authorizeUrl = new URL(authorizeEndpoint);
+    authorizeUrl.searchParams.set('response_type', 'code');
+    authorizeUrl.searchParams.set('client_id', client.client_id);
+    authorizeUrl.searchParams.set('redirect_uri', 'http://localhost:33418/callback');
+    authorizeUrl.searchParams.set('state', claudeState);
+    authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+    authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+    authorizeUrl.searchParams.set('scope', authDeps.scopes.join(' '));
+
+    const authRes = await fetch(authorizeUrl.toString(), { redirect: 'manual' });
+    assert.equal(authRes.status, 302, await authRes.clone().text());
+    const googleState = new URL(authRes.headers.get('location')!).searchParams.get('state');
+    assert.ok(googleState);
+
+    // ── Mocked Google callback mints our code ────────────────────────
+    const cbRes = await fetch(
+      `${baseUrl}/oauth/google/callback?code=google-code&state=${googleState}`,
+      { redirect: 'manual' },
+    );
+    assert.equal(cbRes.status, 302);
+    const finalRedirect = new URL(cbRes.headers.get('location')!);
+    assert.equal(finalRedirect.searchParams.get('state'), claudeState);
+    const ourCode = finalRedirect.searchParams.get('code');
+    assert.ok(ourCode);
+
+    // ── /token with client_id + PKCE verifier, NO client_secret ─────
+    const tokenRes = await fetch(tokenEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: ourCode!,
+        redirect_uri: 'http://localhost:33418/callback',
+        code_verifier: codeVerifier,
+        client_id: client.client_id,
+      }).toString(),
+    });
+    const tokenBody = await tokenRes.text();
+    assert.equal(tokenRes.status, 200, tokenBody);
+    const tokens = JSON.parse(tokenBody);
+    assert.ok(tokens.access_token);
+    assert.ok(tokens.refresh_token, 'public client must receive a refresh_token');
+
+    const payload = await authDeps.jwt.verify(tokens.access_token);
+    assert.equal(payload.sub, TEST_USER_SUB);
+
+    // ── Refresh, still without a client_secret ───────────────────────
+    const refreshRes = await fetch(tokenEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: client.client_id,
+      }).toString(),
+    });
+    assert.equal(refreshRes.status, 200, await refreshRes.clone().text());
+    const refreshed = await refreshRes.json() as any;
+    assert.ok(refreshed.access_token);
+    assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
+
+    // ── Bearer works against /mcp ────────────────────────────────────
+    const mcpRes = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${tokens.access_token}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'e2e-public-client', version: '1.0.0' },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(mcpRes.status, 200, await mcpRes.clone().text());
   });
 
   it('rejects Google callback for non-allowed hosted domain', async () => {

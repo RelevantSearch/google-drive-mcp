@@ -3,13 +3,10 @@
  * (token_endpoint_auth_method "none" — what Claude Code registers as).
  *
  * Exercises the real `createHttpApp({ authDeps })` path so the SDK's
- * mcpAuthRouter /register handler runs as in production. The store stub's
- * saveOAuthClient rejects documents containing undefined values with the
- * same client-side validation the real @google-cloud/firestore client
- * performs before any network I/O:
- *
- *   Value for argument "data" is not a valid Firestore document. Cannot use
- *   "undefined" as a Firestore value (found in field "client_secret").
+ * mcpAuthRouter /register handler runs as in production. The store stub
+ * rejects documents containing undefined values with the same client-side
+ * validation the real @google-cloud/firestore client performs before any
+ * network I/O (see test/helpers/firestore-doc-validation.ts).
  *
  * The SDK sets client_secret: undefined on the clientInfo it passes to
  * registerClient for public clients, so a registerClient that forwards the
@@ -28,6 +25,7 @@ import type {
   PendingAuthorization,
   AuthCodeRecord,
 } from '../../src/auth/types.js';
+import { assertValidFirestoreDocument } from '../helpers/firestore-doc-validation.js';
 
 let _serverModule: any = null;
 async function getServerModule() {
@@ -45,23 +43,6 @@ function startServer(app: any): Promise<{ httpServer: HttpServer; baseUrl: strin
   });
 }
 
-/**
- * Replicates the real Firestore client's document validation: any undefined
- * value (top-level or nested) is rejected before the write reaches the wire.
- */
-function assertValidFirestoreDocument(data: unknown, path = ''): void {
-  if (data === undefined) {
-    throw new Error(
-      `Value for argument "data" is not a valid Firestore document. ` +
-      `Cannot use "undefined" as a Firestore value (found in field "${path}").`,
-    );
-  }
-  if (data === null || typeof data !== 'object' || data instanceof Date) return;
-  for (const [key, value] of Object.entries(data)) {
-    assertValidFirestoreDocument(value, path ? `${path}.${key}` : key);
-  }
-}
-
 /** In-memory FirestoreStore stub that validates writes like real Firestore. */
 function makeStoreStub() {
   const oauthClients = new Map<string, OAuthClient>();
@@ -77,12 +58,21 @@ function makeStoreStub() {
       oauthClients.set(c.client_id, c);
     },
     async getUserTokens(id: string) { return userTokens.get(id); },
-    async saveUserTokens(t: UserTokens) { userTokens.set(t.user_id, t); },
+    async saveUserTokens(t: UserTokens) {
+      assertValidFirestoreDocument(t);
+      userTokens.set(t.user_id, t);
+    },
     async getPendingAuthorization(state: string) { return pending.get(state); },
-    async savePendingAuthorization(state: string, p: PendingAuthorization) { pending.set(state, p); },
+    async savePendingAuthorization(state: string, p: PendingAuthorization) {
+      assertValidFirestoreDocument(p);
+      pending.set(state, p);
+    },
     async deletePendingAuthorization(state: string) { pending.delete(state); },
     async getAuthorizationCode(code: string) { return authCodes.get(code); },
-    async saveAuthorizationCode(code: string, r: AuthCodeRecord) { authCodes.set(code, r); },
+    async saveAuthorizationCode(code: string, r: AuthCodeRecord) {
+      assertValidFirestoreDocument(r);
+      authCodes.set(code, r);
+    },
     async consumeAuthorizationCode(code: string) {
       const rec = authCodes.get(code);
       if (!rec) return undefined;

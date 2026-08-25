@@ -98,11 +98,12 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       ): Promise<OAuthClientInformationFull> => {
         // Public clients (token_endpoint_auth_method "none", e.g. Claude Code)
         // get client_secret: undefined from the SDK. Firestore rejects undefined
-        // values, so omit the field entirely rather than store it.
-        const clientSecret = (clientInfo as any).client_secret as string | undefined;
+        // values, so omit absent optional fields entirely rather than store them.
+        // The secret itself is stored as-is (plaintext) — see getClient above.
         await store.saveOAuthClient({
           client_id: (clientInfo as any).client_id,
-          ...(clientSecret !== undefined && { client_secret: clientSecret }),  // store as-is
+          ...(clientInfo.client_secret !== undefined && { client_secret: clientInfo.client_secret }),
+          ...(clientInfo.client_name !== undefined && { client_name: clientInfo.client_name }),
           redirect_uris: clientInfo.redirect_uris || [],
           created_at: new Date(),
         });
