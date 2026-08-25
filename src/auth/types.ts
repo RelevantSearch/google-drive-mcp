@@ -9,8 +9,13 @@
 /** Persisted in Firestore `oauth_clients` collection. */
 export interface OAuthClient {
   client_id: string;
-  /** Plaintext — SDK does direct comparison. Do NOT hash. */
-  client_secret: string;
+  /**
+   * Plaintext — SDK does direct comparison. Do NOT hash.
+   * Absent for public clients (token_endpoint_auth_method "none"):
+   * the field must be omitted, never written as undefined — Firestore
+   * rejects undefined values.
+   */
+  client_secret?: string;
   redirect_uris: string[];
   client_name?: string;
   created_at: Date;
