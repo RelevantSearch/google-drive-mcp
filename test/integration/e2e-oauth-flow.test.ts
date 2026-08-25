@@ -495,13 +495,13 @@ describe('E2E OAuth 2.1 flow (mocked Google)', () => {
     assert.ok(refreshed.access_token);
     assert.notEqual(refreshed.refresh_token, tokens.refresh_token);
 
-    // ── Bearer works against /mcp ────────────────────────────────────
+    // ── Post-refresh bearer works against /mcp ───────────────────────
     const mcpRes = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
-        Authorization: `Bearer ${tokens.access_token}`,
+        Authorization: `Bearer ${refreshed.access_token}`,
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
