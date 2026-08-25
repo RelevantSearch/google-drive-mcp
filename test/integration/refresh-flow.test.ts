@@ -7,6 +7,7 @@ import type { McpJwt } from '../../src/auth/jwt.js';
 import type { RefreshTokenRecord } from '../../src/auth/types.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { OAuthError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { assertValidFirestoreDocument } from '../helpers/firestore-doc-validation.js';
 
 const TEST_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/drive'];
 const PUBLIC_URL = 'https://drive-mcp.example.com';
@@ -31,14 +32,14 @@ function activeRecord(overrides: Partial<RefreshTokenRecord> = {}): RefreshToken
 function makeMocks() {
   const store = {
     getOAuthClient: mock.fn(async () => undefined),
-    saveOAuthClient: mock.fn(async () => {}),
+    saveOAuthClient: mock.fn(async (c: unknown) => { assertValidFirestoreDocument(c); }),
     getUserTokens: mock.fn(async () => undefined),
-    saveUserTokens: mock.fn(async () => {}),
+    saveUserTokens: mock.fn(async (t: unknown) => { assertValidFirestoreDocument(t); }),
     getPendingAuthorization: mock.fn(async () => undefined),
-    savePendingAuthorization: mock.fn(async () => {}),
+    savePendingAuthorization: mock.fn(async (_s: string, p: unknown) => { assertValidFirestoreDocument(p); }),
     deletePendingAuthorization: mock.fn(async () => {}),
     getAuthorizationCode: mock.fn(async () => undefined),
-    saveAuthorizationCode: mock.fn(async () => {}),
+    saveAuthorizationCode: mock.fn(async (_c: string, r: unknown) => { assertValidFirestoreDocument(r); }),
     consumeAuthorizationCode: mock.fn(async () => undefined),
   } as unknown as FirestoreStore;
 

@@ -6,6 +6,7 @@ import type { GoogleOAuth } from '../../src/auth/google-oauth.js';
 import type { McpJwt } from '../../src/auth/jwt.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Response } from 'express';
+import { assertValidFirestoreDocument } from '../helpers/firestore-doc-validation.js';
 
 // Helper type for accessing mock internals without TS complaints
 type MockFn = ReturnType<typeof mock.fn>;
@@ -19,14 +20,14 @@ function asMock(fn: unknown): MockFn {
 function createMockStore(): FirestoreStore {
   return {
     getOAuthClient: mock.fn(async () => undefined),
-    saveOAuthClient: mock.fn(async () => {}),
+    saveOAuthClient: mock.fn(async (c: unknown) => { assertValidFirestoreDocument(c); }),
     getUserTokens: mock.fn(async () => undefined),
-    saveUserTokens: mock.fn(async () => {}),
+    saveUserTokens: mock.fn(async (t: unknown) => { assertValidFirestoreDocument(t); }),
     getPendingAuthorization: mock.fn(async () => undefined),
-    savePendingAuthorization: mock.fn(async () => {}),
+    savePendingAuthorization: mock.fn(async (_s: string, p: unknown) => { assertValidFirestoreDocument(p); }),
     deletePendingAuthorization: mock.fn(async () => {}),
     getAuthorizationCode: mock.fn(async () => undefined),
-    saveAuthorizationCode: mock.fn(async () => {}),
+    saveAuthorizationCode: mock.fn(async (_c: string, r: unknown) => { assertValidFirestoreDocument(r); }),
     consumeAuthorizationCode: mock.fn(async () => undefined),
   } as unknown as FirestoreStore;
 }
