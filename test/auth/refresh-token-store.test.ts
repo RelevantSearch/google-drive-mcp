@@ -2,6 +2,7 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { RefreshTokenStore } from '../../src/auth/refresh-token-store.js';
+import { assertFirestoreWritable } from '../helpers/firestore-strict.js';
 import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Firestore } from '@google-cloud/firestore';
 import type { RefreshTokenRecord } from '../../src/auth/types.js';
@@ -14,16 +15,25 @@ function makeMockFirestore() {
     return {
       _path: path,
       _get: () => ({ exists: docs.has(path), data: () => docs.get(path) }),
-      _set: (data: any) => docs.set(path, data),
-      _update: (patch: any) => docs.set(path, { ...(docs.get(path) || {}), ...patch }),
+      // _set/_update back the transaction and batch ops too, so the
+      // reject-undefined check covers every write path of the fake.
+      _set: (data: any) => { assertFirestoreWritable(data); docs.set(path, data); },
+      _update: (patch: any) => {
+        assertFirestoreWritable(patch);
+        docs.set(path, { ...(docs.get(path) || {}), ...patch });
+      },
       _delete: () => docs.delete(path),
       get: mock.fn(async () => ({ exists: docs.has(path), data: () => docs.get(path) })),
-      set: mock.fn(async (data: any) => { docs.set(path, data); }),
+      set: mock.fn(async (data: any) => { assertFirestoreWritable(data); docs.set(path, data); }),
       create: mock.fn(async (data: any) => {
+        assertFirestoreWritable(data);
         if (docs.has(path)) throw new Error('already exists');
         docs.set(path, data);
       }),
-      update: mock.fn(async (patch: any) => { docs.set(path, { ...(docs.get(path) || {}), ...patch }); }),
+      update: mock.fn(async (patch: any) => {
+        assertFirestoreWritable(patch);
+        docs.set(path, { ...(docs.get(path) || {}), ...patch });
+      }),
       delete: mock.fn(async () => { docs.delete(path); }),
     };
   };

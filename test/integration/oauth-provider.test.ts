@@ -188,7 +188,7 @@ describe('DriveOAuthProvider', () => {
         response_types: ['code'],
       } as unknown as OAuthClientInformationFull;
 
-      const result = await provider.clientsStore.registerClient!(clientInfo as any);
+      const result = await provider.clientsStore.registerClient!(clientInfo);
       assert.equal(result.client_id, 'sdk-generated-public-id');
 
       const saveCall = asMock(store.saveOAuthClient).mock.calls[0];
@@ -197,7 +197,8 @@ describe('DriveOAuthProvider', () => {
       assert.equal(saved.client_id, 'sdk-generated-public-id');
       assert.ok(!('client_secret' in saved), 'client_secret key must be omitted for public clients');
       for (const [key, value] of Object.entries(saved)) {
-        assert.notEqual(value, undefined, `saved document must not contain undefined field: ${key}`);
+        // Strict check on purpose: Firestore rejects undefined but accepts null.
+        assert.ok(value !== undefined, `saved document must not contain undefined field: ${key}`);
       }
     });
   });

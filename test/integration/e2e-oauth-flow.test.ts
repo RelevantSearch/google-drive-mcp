@@ -103,7 +103,7 @@ function makeRefreshTokenStoreStub() {
       const chainId = `chain-${counter}`;
       const now = new Date();
       const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
-      docs.set(raw, {
+      const record = {
         user_id: params.userId,
         email: params.email,
         scopes: params.scopes,
@@ -112,7 +112,11 @@ function makeRefreshTokenStoreStub() {
         expires_at: expiresAt,
         status: 'active',
         rotated_at: null,
-      });
+      };
+      // The real RefreshTokenStore writes this record to the same bare
+      // Firestore instance, so the stub enforces the same constraint.
+      assertFirestoreWritable(record);
+      docs.set(raw, record as Doc);
       return { rawToken: raw, chainId, expiresAt };
     },
     validate: async (raw: string) => {
@@ -125,7 +129,9 @@ function makeRefreshTokenStoreStub() {
       docs.set(raw, { ...old, status: 'rotated', rotated_at: new Date() });
       counter++;
       const newRaw = `r-${counter}`;
-      docs.set(newRaw, { ...old, status: 'active', rotated_at: null, created_at: new Date() });
+      const newRecord = { ...old, status: 'active' as const, rotated_at: null, created_at: new Date() };
+      assertFirestoreWritable(newRecord);
+      docs.set(newRaw, newRecord);
       return { rawToken: newRaw, chainId: old.chain_id, expiresAt: old.expires_at };
     },
     revokeChain: async (chainId: string) => {
