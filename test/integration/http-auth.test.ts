@@ -14,6 +14,7 @@ import type { Server as HttpServer } from 'node:http';
 
 import { DriveOAuthProvider } from '../../src/auth/provider.js';
 import { McpJwt } from '../../src/auth/jwt.js';
+import { assertFirestoreWritable } from '../helpers/firestore-strict.js';
 import type {
   OAuthClient,
   UserTokens,
@@ -50,14 +51,26 @@ function makeStoreStub() {
     _pending: pending,
     _codes: authCodes,
     async getOAuthClient(id: string) { return oauthClients.get(id); },
-    async saveOAuthClient(c: OAuthClient) { oauthClients.set(c.client_id, c); },
+    async saveOAuthClient(c: OAuthClient) {
+      assertFirestoreWritable(c);
+      oauthClients.set(c.client_id, c);
+    },
     async getUserTokens(id: string) { return userTokens.get(id); },
-    async saveUserTokens(t: UserTokens) { userTokens.set(t.user_id, t); },
+    async saveUserTokens(t: UserTokens) {
+      assertFirestoreWritable(t);
+      userTokens.set(t.user_id, t);
+    },
     async getPendingAuthorization(state: string) { return pending.get(state); },
-    async savePendingAuthorization(state: string, p: PendingAuthorization) { pending.set(state, p); },
+    async savePendingAuthorization(state: string, p: PendingAuthorization) {
+      assertFirestoreWritable(p);
+      pending.set(state, p);
+    },
     async deletePendingAuthorization(state: string) { pending.delete(state); },
     async getAuthorizationCode(code: string) { return authCodes.get(code); },
-    async saveAuthorizationCode(code: string, r: AuthCodeRecord) { authCodes.set(code, r); },
+    async saveAuthorizationCode(code: string, r: AuthCodeRecord) {
+      assertFirestoreWritable(r);
+      authCodes.set(code, r);
+    },
     async consumeAuthorizationCode(code: string) {
       const rec = authCodes.get(code);
       if (!rec) return undefined;

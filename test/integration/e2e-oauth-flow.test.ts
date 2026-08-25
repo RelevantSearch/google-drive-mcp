@@ -22,6 +22,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { DriveOAuthProvider } from '../../src/auth/provider.js';
 import { McpJwt } from '../../src/auth/jwt.js';
+import { assertFirestoreWritable } from '../helpers/firestore-strict.js';
 import type {
   OAuthClient,
   UserTokens,
@@ -54,24 +55,25 @@ function makeStoreStub() {
   return {
     async getOAuthClient(id: string) { return oauthClients.get(id); },
     async saveOAuthClient(c: OAuthClient) {
-      // Mirror real Firestore: a write containing any undefined value is
-      // rejected (the deployed FirestoreStore runs without
-      // ignoreUndefinedProperties). Public-client registration used to trip
-      // this in production, so the stub must stay strict.
-      for (const [key, value] of Object.entries(c)) {
-        if (value === undefined) {
-          throw new Error(`Cannot use "undefined" as a Firestore value (found in field "${key}")`);
-        }
-      }
+      assertFirestoreWritable(c);
       oauthClients.set(c.client_id, c);
     },
     async getUserTokens(id: string) { return userTokens.get(id); },
-    async saveUserTokens(t: UserTokens) { userTokens.set(t.user_id, t); },
+    async saveUserTokens(t: UserTokens) {
+      assertFirestoreWritable(t);
+      userTokens.set(t.user_id, t);
+    },
     async getPendingAuthorization(state: string) { return pending.get(state); },
-    async savePendingAuthorization(state: string, p: PendingAuthorization) { pending.set(state, p); },
+    async savePendingAuthorization(state: string, p: PendingAuthorization) {
+      assertFirestoreWritable(p);
+      pending.set(state, p);
+    },
     async deletePendingAuthorization(state: string) { pending.delete(state); },
     async getAuthorizationCode(code: string) { return authCodes.get(code); },
-    async saveAuthorizationCode(code: string, r: AuthCodeRecord) { authCodes.set(code, r); },
+    async saveAuthorizationCode(code: string, r: AuthCodeRecord) {
+      assertFirestoreWritable(r);
+      authCodes.set(code, r);
+    },
     async consumeAuthorizationCode(code: string) {
       const rec = authCodes.get(code);
       if (!rec) return undefined;
@@ -422,7 +424,11 @@ describe('E2E OAuth 2.1 flow (mocked Google)', () => {
     assert.equal(regRes.status, 201, regBody);
     const client = JSON.parse(regBody);
     assert.ok(client.client_id);
-    assert.equal(client.client_secret, undefined, 'public client must not receive a secret');
+    assert.ok(!('client_secret' in client), 'public client must not receive a secret');
+    assert.ok(
+      !('client_secret_expires_at' in client),
+      'public client response must not carry a secret expiry',
+    );
 
     // The stored doc must be retrievable and secret-less so the SDK's
     // authenticateClient skips the secret comparison.

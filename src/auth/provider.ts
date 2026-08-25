@@ -84,10 +84,12 @@ export class DriveOAuthProvider implements OAuthServerProvider {
         const doc = await store.getOAuthClient(clientId);
         if (!doc) return undefined;
         // Return as-is — SDK's authenticateClient does direct string comparison
-        // on client_secret. Do NOT hash.
+        // on client_secret. Do NOT hash. Public-client docs have no
+        // client_secret field; omit it here too so this object stays safe to
+        // write back to Firestore (which rejects undefined values).
         return {
           client_id: doc.client_id,
-          client_secret: doc.client_secret,  // plaintext, not hashed
+          ...(doc.client_secret !== undefined ? { client_secret: doc.client_secret } : {}),  // plaintext, not hashed
           redirect_uris: doc.redirect_uris,
         } as OAuthClientInformationFull;
       },
@@ -100,7 +102,7 @@ export class DriveOAuthProvider implements OAuthServerProvider {
         // client_secret === undefined. Firestore rejects any write containing
         // an undefined value (this store runs without ignoreUndefinedProperties),
         // so the field must be omitted entirely — including it crashes /register.
-        const clientSecret = (clientInfo as any).client_secret as string | undefined;
+        const clientSecret = clientInfo.client_secret;
         await store.saveOAuthClient({
           client_id: (clientInfo as any).client_id,
           ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}),  // store as-is
