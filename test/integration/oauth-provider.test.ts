@@ -171,6 +171,55 @@ describe('DriveOAuthProvider', () => {
       assert.deepEqual(saved.redirect_uris, ['https://claude.ai/oauth/callback']);
       assert.ok(saved.created_at instanceof Date);
     });
+
+    it('omits client_secret for public clients (token_endpoint_auth_method none)', async () => {
+      // The SDK's clientRegistrationHandler sets client_secret to undefined
+      // for public clients. Firestore (bare client, no ignoreUndefinedProperties)
+      // rejects any write containing an undefined value, so the saved document
+      // must OMIT the field, not carry it as undefined — otherwise /register 500s.
+      const clientInfo = {
+        client_id: 'sdk-generated-public-id',
+        client_secret: undefined,
+        client_secret_expires_at: undefined,
+        client_name: 'RS Agent Platform',
+        redirect_uris: ['https://platform.nonprod.relevantsearch.com/api/v1/connectors/callback'],
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      } as unknown as OAuthClientInformationFull;
+
+      const result = await provider.clientsStore.registerClient!(clientInfo as any);
+      assert.equal(result.client_id, 'sdk-generated-public-id');
+
+      const saveCall = asMock(store.saveOAuthClient).mock.calls[0];
+      assert.ok(saveCall);
+      const saved = saveCall.arguments[0] as Record<string, unknown>;
+      assert.equal(saved.client_id, 'sdk-generated-public-id');
+      assert.ok(!('client_secret' in saved), 'client_secret key must be omitted for public clients');
+      for (const [key, value] of Object.entries(saved)) {
+        assert.notEqual(value, undefined, `saved document must not contain undefined field: ${key}`);
+      }
+    });
+  });
+
+  describe('clientsStore.getClient with a public client', () => {
+    it('returns the client without a secret so SDK auth skips the secret check', async () => {
+      // Stored public-client doc has no client_secret field at all.
+      asMock(store.getOAuthClient).mock.mockImplementation(
+        async () => ({
+          client_id: 'public-client-id',
+          redirect_uris: ['https://platform.nonprod.relevantsearch.com/api/v1/connectors/callback'],
+          created_at: new Date(),
+        }),
+      );
+
+      const result = await provider.clientsStore.getClient('public-client-id');
+      assert.ok(result);
+      assert.equal(result!.client_id, 'public-client-id');
+      // SDK's authenticateClient only compares secrets `if (client.client_secret)`;
+      // a missing secret means public client — must come back falsy.
+      assert.equal(result!.client_secret, undefined);
+    });
   });
 
   describe('authorize', () => {

@@ -96,9 +96,14 @@ export class DriveOAuthProvider implements OAuthServerProvider {
       registerClient: async (
         clientInfo: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>
       ): Promise<OAuthClientInformationFull> => {
+        // Public clients (token_endpoint_auth_method "none") arrive with
+        // client_secret === undefined. Firestore rejects any write containing
+        // an undefined value (this store runs without ignoreUndefinedProperties),
+        // so the field must be omitted entirely — including it crashes /register.
+        const clientSecret = (clientInfo as any).client_secret as string | undefined;
         await store.saveOAuthClient({
           client_id: (clientInfo as any).client_id,
-          client_secret: (clientInfo as any).client_secret,  // store as-is
+          ...(clientSecret !== undefined ? { client_secret: clientSecret } : {}),  // store as-is
           redirect_uris: clientInfo.redirect_uris || [],
           created_at: new Date(),
         });

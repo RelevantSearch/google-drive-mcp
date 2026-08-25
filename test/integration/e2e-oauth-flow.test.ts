@@ -53,7 +53,18 @@ function makeStoreStub() {
 
   return {
     async getOAuthClient(id: string) { return oauthClients.get(id); },
-    async saveOAuthClient(c: OAuthClient) { oauthClients.set(c.client_id, c); },
+    async saveOAuthClient(c: OAuthClient) {
+      // Mirror real Firestore: a write containing any undefined value is
+      // rejected (the deployed FirestoreStore runs without
+      // ignoreUndefinedProperties). Public-client registration used to trip
+      // this in production, so the stub must stay strict.
+      for (const [key, value] of Object.entries(c)) {
+        if (value === undefined) {
+          throw new Error(`Cannot use "undefined" as a Firestore value (found in field "${key}")`);
+        }
+      }
+      oauthClients.set(c.client_id, c);
+    },
     async getUserTokens(id: string) { return userTokens.get(id); },
     async saveUserTokens(t: UserTokens) { userTokens.set(t.user_id, t); },
     async getPendingAuthorization(state: string) { return pending.get(state); },
@@ -385,6 +396,39 @@ describe('E2E OAuth 2.1 flow (mocked Google)', () => {
       }).toString(),
     });
     assert.ok(replayRes.status >= 400, 'replay of consumed code must not succeed');
+  });
+
+  it('registers a public client (token_endpoint_auth_method none) with 201', async () => {
+    // Regression: the agent platform's DCR ladder registers public clients.
+    // The SDK leaves client_secret undefined for them; persisting that
+    // undefined crashed Firestore serialization and turned /register into a
+    // 500 in production. The strict saveOAuthClient stub above reproduces
+    // that failure mode.
+    const meta = await (await fetch(`${baseUrl}/.well-known/oauth-authorization-server`)).json();
+    const regEndpoint = `${baseUrl}${new URL(meta.registration_endpoint).pathname}`;
+
+    const regRes = await fetch(regEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'RS Agent Platform (e2e)',
+        redirect_uris: ['https://platform.nonprod.relevantsearch.com/api/v1/connectors/callback'],
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      }),
+    });
+    const regBody = await regRes.text();
+    assert.equal(regRes.status, 201, regBody);
+    const client = JSON.parse(regBody);
+    assert.ok(client.client_id);
+    assert.equal(client.client_secret, undefined, 'public client must not receive a secret');
+
+    // The stored doc must be retrievable and secret-less so the SDK's
+    // authenticateClient skips the secret comparison.
+    const stored = await authDeps.store.getOAuthClient(client.client_id);
+    assert.ok(stored);
+    assert.ok(!('client_secret' in stored), 'stored public client must omit client_secret');
   });
 
   it('rejects Google callback for non-allowed hosted domain', async () => {
