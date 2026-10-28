@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, before, after } from 'node:test';
 import type { Server as HttpServer } from 'node:http';
+import * as zlib from 'node:zlib';
 
 import { DriveOAuthProvider } from '../../src/auth/provider.js';
 import { McpJwt } from '../../src/auth/jwt.js';
@@ -206,5 +207,93 @@ describe('HTTP transport — OAuth wiring', () => {
   it('GET /oauth/google/callback with missing params returns 400', async () => {
     const res = await fetch(`${baseUrl}/oauth/google/callback`);
     assert.equal(res.status, 400);
+  });
+});
+
+describe('HTTP transport — refuses content-encoded bodies (CVE-2026-111497)', () => {
+  const REG = {
+    redirect_uris: ['http://localhost:33418/callback'],
+    grant_types: ['authorization_code'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+  const registrationBody = JSON.stringify(REG);
+  const brotliRegistrationBody = zlib.brotliCompressSync(registrationBody);
+  const brotliMcpBody = zlib.brotliCompressSync(JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+  }));
+  const unsupportedEncodingError = {
+    error: 'unsupported_content_encoding',
+    error_description: 'compressed request bodies are not accepted',
+  };
+  let httpServer: HttpServer;
+  let baseUrl: string;
+
+  before(async () => {
+    const mod = await getServerModule();
+    const { app } = mod.createHttpApp('127.0.0.1', {
+      authDeps: buildTestAuthDeps(),
+      trustProxyHops: 2,
+    });
+    const started = await startServer(app);
+    httpServer = started.httpServer;
+    baseUrl = started.baseUrl;
+  });
+
+  after(async () => {
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const rejectedRequests = [
+    { route: '/register', encoding: 'br', contentType: 'application/json', body: brotliRegistrationBody },
+    { route: '/register', encoding: 'BR', contentType: 'application/json', body: brotliRegistrationBody },
+    { route: '/register', encoding: 'identity, br', contentType: 'application/json', body: brotliRegistrationBody },
+    { route: '/register', encoding: 'gzip', contentType: 'application/json', body: zlib.gzipSync(registrationBody) },
+    {
+      route: '/token', encoding: 'deflate', contentType: 'application/x-www-form-urlencoded',
+      body: zlib.deflateSync('grant_type=authorization_code&code=x'),
+    },
+    { route: '/mcp', encoding: 'br', contentType: 'application/json', body: brotliMcpBody },
+  ];
+
+  for (const { route, encoding, contentType, body } of rejectedRequests) {
+    it(`POST ${route} with Content-Encoding: ${encoding} returns 415 before auth or parsing`, async () => {
+      const res = await fetch(`${baseUrl}${route}`, {
+        method: 'POST',
+        headers: { 'Content-Encoding': encoding, 'Content-Type': contentType },
+        body,
+      });
+      assert.equal(res.status, 415);
+      assert.deepEqual(await res.json(), unsupportedEncodingError);
+    });
+  }
+
+  for (const encoding of ['identity', '']) {
+    it(`POST /register with Content-Encoding: ${JSON.stringify(encoding)} returns 201`, async () => {
+      const res = await fetch(`${baseUrl}/register`, {
+        method: 'POST',
+        headers: { 'Content-Encoding': encoding, 'Content-Type': 'application/json' },
+        body: registrationBody,
+      });
+      assert.equal(res.status, 201);
+      await res.json();
+    });
+  }
+
+  it('POST /mcp with br returns 415 on the no-auth app', async () => {
+    const mod = await getServerModule();
+    const { app } = mod.createHttpApp('127.0.0.1');
+    const started = await startServer(app);
+    try {
+      const res = await fetch(`${started.baseUrl}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Encoding': 'br', 'Content-Type': 'application/json' },
+        body: brotliMcpBody,
+      });
+      assert.equal(res.status, 415);
+      assert.deepEqual(await res.json(), unsupportedEncodingError);
+    } finally {
+      await new Promise<void>((resolve) => started.httpServer.close(() => resolve()));
+    }
   });
 });

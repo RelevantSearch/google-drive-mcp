@@ -3,7 +3,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import { localhostHostValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
@@ -22,7 +22,8 @@ import { OAuth2Client } from 'google-auth-library';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
-import type { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response, RequestHandler } from 'express';
 import {
   getExtensionFromFilename,
   escapeDriveQuery,
@@ -737,6 +738,21 @@ function resolveTrustProxyHops(options?: { trustProxyHops?: number }): number {
   return DEFAULT_TRUST_PROXY_HOPS;
 }
 
+export function refuseEncodedRequestBodies(): RequestHandler {
+  return (req, res, next) => {
+    const encoding = (req.headers['content-encoding'] || 'identity').trim().toLowerCase();
+    if (encoding !== 'identity') {
+      log('Refused a content-encoded request body', { reason: 'encoding_unsupported' });
+      res.status(415).json({
+        error: 'unsupported_content_encoding',
+        error_description: 'compressed request bodies are not accepted',
+      });
+      return;
+    }
+    next();
+  };
+}
+
 interface CreateHttpAppOptions {
   sessionIdleTimeoutMs?: number;
   /**
@@ -759,7 +775,12 @@ interface CreateHttpAppOptions {
 function createHttpApp(host: string, options?: CreateHttpAppOptions) {
   const idleTimeoutMs = options?.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS;
   const authDeps = options?.authDeps;
-  const app = createMcpExpressApp({ host });
+  // The SDK helper's express.json() would run before the gate.
+  // Refuse encoded bodies before any parser for CVE-2026-111497.
+  const app = express();
+  app.use(refuseEncodedRequestBodies());
+  app.use(express.json());
+  if (['127.0.0.1', 'localhost', '::1'].includes(host)) app.use(localhostHostValidation());
   // Cloud Run + GCLB sit in front. Two trusted proxies append to
   // X-Forwarded-For: the global external HTTPS LB and the Cloud Run frontend.
   // GCLB *appends* to any inbound XFF rather than stripping it, so
