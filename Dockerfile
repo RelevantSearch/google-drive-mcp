@@ -1,4 +1,5 @@
-FROM node:22-slim
+# Pinned to the CVE-2026-111497 fix; bump deliberately.
+FROM node:22.23.4-slim
 
 WORKDIR /app
 
